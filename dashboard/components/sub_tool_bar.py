@@ -73,7 +73,7 @@ class SubToolBar(QWidget):
     connect_mqtt_triggered = pyqtSignal()
     disconnect_mqtt_triggered = pyqtSignal()
     layout_selected = pyqtSignal(str)
-    open_file_triggered = pyqtSignal(str)
+    open_file_triggered = pyqtSignal(dict)  # Changed to emit a dict with project, model, and filename
 
     def __init__(self, parent):
         super().__init__(parent)
@@ -158,8 +158,10 @@ class SubToolBar(QWidget):
             self.is_saving = is_saving
             if is_saving:
                 self.start_blinking()
+                self.start_saving_triggered.emit()
             else:
                 self.stop_blinking()
+                self.stop_saving_triggered.emit()
             self.update_subtoolbar()
             logging.debug(f"SubToolBar: Updated saving state to {is_saving}")
         else:
@@ -181,7 +183,7 @@ class SubToolBar(QWidget):
 
     def schedule_files_combo_update(self):
         """Schedule an update for the files combo with a slight delay to ensure DB commit."""
-        QTimer.singleShot(1000, self.update_files_combo)  # Increased delay to 1000ms
+        QTimer.singleShot(1000, self.update_files_combo)
         logging.debug("SubToolBar: Scheduled files combo update")
 
     def update_files_combo(self):
@@ -209,34 +211,29 @@ class SubToolBar(QWidget):
                 logging.debug("SubToolBar: No model selected, disabled files combo")
                 return
 
-            # Retry fetching filenames up to 5 times with increasing delay
             for attempt in range(5):
                 filenames = self.parent.db.get_distinct_filenames(self.current_project, model_name)
                 if filenames:
                     break
                 logging.debug(f"SubToolBar: Attempt {attempt + 1} failed to retrieve filenames, retrying after {0.2 * (attempt + 1)}s...")
-                time.sleep(0.2 * (attempt + 1))  # Exponential backoff: 0.2s, 0.4s, 0.6s, 0.8s, 1.0s
-            else:
+                time.sleep(0.2 * (attempt + 1))
+
+            if not filenames:
                 self.files_combo.addItem("No files available")
                 self.files_combo.setEnabled(False)
                 self.open_action.setEnabled(False)
-                logging.debug("SubToolBar: No filenames found after retries, disabled files combo")
-                return
-
-            # Sort filenames numerically based on the number in "dataX"
-            sorted_filenames = sorted(
-                filenames,
-                key=lambda x: int(re.match(r"data(\d+)", x).group(1)) if re.match(r"data(\d+)", x) else 0
-            )
-            self.files_combo.addItems(sorted_filenames)
-            self.files_combo.setEnabled(not self.mqtt_connected)
-            self.open_action.setEnabled(not self.mqtt_connected and sorted_filenames)
-            logging.debug(f"SubToolBar: Populated files combo with {len(sorted_filenames)} items, enabled={not self.mqtt_connected}")
+                logging.debug("SubToolBar: No files available")
+            else:
+                self.files_combo.addItems(filenames)
+                self.files_combo.setEnabled(True)
+                self.open_action.setEnabled(not self.mqtt_connected)
+                logging.debug(f"SubToolBar: Populated files combo with {len(filenames)} filenames")
         except Exception as e:
             self.files_combo.addItem("Error loading files")
             self.files_combo.setEnabled(False)
             self.open_action.setEnabled(False)
             logging.error(f"SubToolBar: Error updating files combo: {str(e)}")
+        self.update_subtoolbar()
 
     def update_subtoolbar(self):
         logging.debug(f"SubToolBar: Updating toolbar, project: {self.current_project}, MQTT: {self.mqtt_connected}, Saving: {self.is_saving}")
@@ -270,8 +267,6 @@ class SubToolBar(QWidget):
             QLineEdit:focus { border: 1px solid #1e88e5; background-color: #ffffff; }
             QLineEdit[readOnly="true"] { background-color: #e0e0e0; color: #616161; border: 1px solid #b0bec5; }
         """)
-        is_time_view = self.parent.current_feature == "Time View"
-        self.filename_edit.setReadOnly(not is_time_view)
         self.filename_edit.setEnabled(self.current_project is not None)
         self.refresh_filename()
         self.toolbar.addWidget(self.filename_edit)
@@ -284,7 +279,6 @@ class SubToolBar(QWidget):
         self.timer_label.setStyleSheet("font-size: 20px; padding: 0px 8px;")
         self.toolbar.addWidget(self.timer_label)
 
-        # Ensure blinking and timer reflect the current is_saving state
         if self.is_saving:
             self.start_blinking()
         else:
@@ -394,8 +388,17 @@ class SubToolBar(QWidget):
     def open_selected_file(self):
         selected_file = self.files_combo.currentText()
         if selected_file and selected_file not in ["No files available", "No project selected", "Error loading files"]:
-            self.open_file_triggered.emit(selected_file)
-            logging.debug(f"SubToolBar: Open file triggered for {selected_file}")
+            model_name = self.parent.tree_view.get_selected_model()
+            if model_name and self.current_project:
+                file_data = {
+                    "project_name": self.current_project,
+                    "model_name": model_name,
+                    "filename": selected_file
+                }
+                self.open_file_triggered.emit(file_data)
+                logging.debug(f"SubToolBar: Open file triggered for {file_data}")
+            else:
+                logging.debug(f"SubToolBar: Cannot open file, missing model or project: model={model_name}, project={self.current_project}")
         else:
             logging.debug(f"SubToolBar: Invalid file selection: {selected_file}")
 

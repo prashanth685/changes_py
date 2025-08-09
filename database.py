@@ -15,7 +15,7 @@ class Database:
         self.db = None
         self.projects_collection = None
         self.messages_collection = None
-        self.timeview_collection = None
+        self.history_collection = None
         self.tabularview_collection = None
         self.fftsettings_collection = None
         self.projects = []
@@ -28,10 +28,10 @@ class Database:
             self.db = self.client["changed_db"]
             self.projects_collection = self.db["projects"]
             self.messages_collection = self.db["mqttmessage"]
-            self.timeview_collection = self.db["timeview_messages"]
+            self.history_collection = self.db["history"]
             self.tabularview_collection = self.db["TabularViewSettings"]
             self.fftsettings_collection = self.db["FFTSettings"]
-            self._create_timeview_indexes()
+            self._create_history_indexes()
             logging.info(f"Database initialized for {self.email}")
         except Exception as e:
             logging.error(f"Failed to connect to MongoDB: {str(e)}")
@@ -56,15 +56,17 @@ class Database:
             logging.error(f"Failed to reconnect to MongoDB: {str(e)}")
             raise
 
-    def _create_timeview_indexes(self):
+    def _create_history_indexes(self):
         try:
-            self.timeview_collection.create_index([("topic", ASCENDING)])
-            self.timeview_collection.create_index([("filename", ASCENDING)])
-            self.timeview_collection.create_index([("frameIndex", ASCENDING)])
-            self.timeview_collection.create_index([("topic", ASCENDING), ("filename", ASCENDING)])
-            logging.info("Indexes created for timeview_messages collection")
+            self.history_collection.create_index([
+                ("projectName", ASCENDING),
+                ("moduleName", ASCENDING),
+                ("filename", ASCENDING),
+                ("frameIndex", ASCENDING)
+            ])
+            logging.info("Indexes created for history collection")
         except Exception as e:
-            logging.error(f"Failed to create indexes for timeview_messages: {str(e)}")
+            logging.error(f"Failed to create indexes for history: {str(e)}")
 
     def close_connection(self):
         if self.client:
@@ -74,7 +76,7 @@ class Database:
                 self.db = None
                 self.projects_collection = None
                 self.messages_collection = None
-                self.timeview_collection = None
+                self.history_collection = None
                 self.tabularview_collection = None
                 self.fftsettings_collection = None
                 logging.info("MongoDB connection closed")
@@ -228,6 +230,19 @@ class Database:
             channel["ConvertedSensitivity"] = sensitivity  # mil
         logging.debug(f"Calculated ConvertedSensitivity for {channel['channelName']}: {channel['ConvertedSensitivity']} (unit: {unit})")
 
+    def get_project_data(self, project_name):
+        try:
+            project_data = self.projects_collection.find_one({"project_name": project_name, "email": self.email})
+            if project_data:
+                logging.debug(f"Retrieved project data for {project_name}")
+                return project_data
+            else:
+                logging.warning(f"No project data found for {project_name}")
+                return None
+        except Exception as e:
+            logging.error(f"Error fetching project data for {project_name}: {str(e)}")
+            return None
+
     def edit_project(self, old_project_name, new_project_name, updated_models=None, channel_count=None):
         if not old_project_name or not new_project_name:
             return False, "Project names cannot be empty!"
@@ -287,9 +302,8 @@ class Database:
             if updated_models and updated_models[0].get("channels"):
                 unit = updated_models[0]["channels"][0].get("unit", "mil").lower().strip()
                 if unit not in valid_units:
-                    logging.warning(f"Invalid unit '{unit}' in first channel, defaulting to 'mil'")
+                    logging.warning(f"Invalid unit '{unit}' in updated models, defaulting to 'mil'")
                     unit = "mil"
-                logging.debug(f"Updating TabularViewSettings with unit: {unit}")
                 self.tabularview_collection.update_one(
                     {"project_name": old_project_name, "email": self.email},
                     {"$set": {
@@ -298,119 +312,45 @@ class Database:
                         "updated_at": datetime.datetime.utcnow()
                     }}
                 )
-                logging.info(f"Updated TabularViewSettings for project: {new_project_name} with unit: {unit}")
+                logging.info(f"Updated TabularViewSettings for project {new_project_name} with unit: {unit}")
 
-            # Update other collections for project name change
-            if old_project_name != new_project_name:
-                self.messages_collection.update_many(
-                    {"project_name": old_project_name, "email": self.email},
-                    {"$set": {"project_name": new_project_name}}
-                )
-                self.timeview_collection.update_many(
-                    {"project_name": old_project_name, "email": self.email},
-                    {"$set": {"project_name": new_project_name}}
-                )
-                self.fftsettings_collection.update_many(
-                    {"project_name": old_project_name, "email": self.email},
-                    {"$set": {"project_name": new_project_name, "updatedAt": datetime.datetime.utcnow()}}
-                )
-                if old_project_name in self.projects:
-                    self.projects[self.projects.index(old_project_name)] = new_project_name
-                logging.info(f"Project renamed from '{old_project_name}' to '{new_project_name}'")
-            return True, f"Project updated to '{new_project_name}' successfully!"
-        except Exception as e:
-            logging.error(f"Failed to edit project: {str(e)}")
-            return False, f"Failed to edit project: {str(e)}"
-
-    def update_channel_properties(self, project_name, model_name, channel_name, updated_properties):
-        if not self.get_project_data(project_name):
-            return False, "Project not found!"
-        project_data = self.get_project_data(project_name)
-        model = next((m for m in project_data.get("models", []) if m["name"] == model_name), None)
-        if not model:
-            return False, f"Model '{model_name}' not found in project!"
-        channel = next((c for c in model.get("channels", []) if c["channelName"] == channel_name), None)
-        if not channel:
-            return False, f"Channel '{channel_name}' not found in model!"
-
-        valid_units = ["mil", "mm", "um"]
-        if "unit" in updated_properties:
-            unit = updated_properties["unit"].lower().strip()
-            if unit not in valid_units:
-                logging.error(f"Invalid unit '{unit}' for channel {channel_name}. Must be one of {valid_units}")
-                return False, f"Invalid unit '{unit}' for channel {channel_name}. Must be one of {valid_units}"
-
-        channel.update(updated_properties)
-        self._calculate_channel_properties(channel)
-
-        try:
-            result = self.projects_collection.update_one(
-                {"project_name": project_name, "email": self.email, "models.name": model_name},
-                {"$set": {"models.$.channels": model["channels"]}}
+            # Update FFTSettings
+            self.fftsettings_collection.update_one(
+                {"project_name": old_project_name, "email": self.email},
+                {"$set": {
+                    "project_name": new_project_name,
+                    "updatedAt": datetime.datetime.utcnow()
+                }}
             )
-            # Update TabularViewSettings unit if changed
-            if "unit" in updated_properties:
-                unit = updated_properties.get("unit", "mil").lower().strip()
-                logging.debug(f"Updating TabularViewSettings with new unit: {unit} for project: {project_name}")
-                self.tabularview_collection.update_one(
-                    {"project_name": project_name, "email": self.email},
-                    {"$set": {
-                        "project_name": project_name,
-                        "unit": unit,
-                        "updated_at": datetime.datetime.utcnow()
-                    }}
-                )
-                logging.info(f"Updated TabularViewSettings unit to {unit} for project: {project_name}")
-            logging.info(f"Updated channel {channel_name} in {project_name}/{model_name}: matched {result.matched_count}, modified {result.modified_count}")
-            return True, f"Channel '{channel_name}' updated successfully!"
+            logging.info(f"Updated FFTSettings for project {new_project_name}")
+
+            # Update history collection
+            self.history_collection.update_many(
+                {"projectName": old_project_name, "email": self.email},
+                {"$set": {
+                    "projectName": new_project_name,
+                    "updatedAt": datetime.datetime.utcnow().isoformat()
+                }}
+            )
+            logging.info(f"Updated history collection for project {new_project_name}")
+
+            if old_project_name in self.projects:
+                self.projects.remove(old_project_name)
+            if new_project_name not in self.projects:
+                self.projects.append(new_project_name)
+            return True, f"Project '{new_project_name}' updated successfully!"
         except Exception as e:
-            logging.error(f"Failed to update channel: {str(e)}")
-            return False, f"Failed to update channel: {str(e)}"
+            logging.error(f"Failed to update project: {str(e)}")
+            return False, f"Failed to update project: {str(e)}"
 
-    def delete_project(self, project_name):
-        try:
-            result = self.projects_collection.delete_one({"project_name": project_name, "email": self.email})
-            logging.info(f"Deleted project {project_name}: {result.deleted_count} documents")
-            self.messages_collection.delete_many({"project_name": project_name, "email": self.email})
-            self.timeview_collection.delete_many({"project_name": project_name, "email": self.email})
-            self.tabularview_collection.delete_many({"project_name": project_name, "email": self.email})
-            self.fftsettings_collection.delete_many({"project_name": project_name, "email": self.email})
-            if project_name in self.projects:
-                self.projects.remove(project_name)
-            logging.info(f"Project '{project_name}' deleted")
-            return True, f"Project '{project_name}' deleted successfully!"
-        except Exception as e:
-            logging.error(f"Failed to delete project: {str(e)}")
-            return False, f"Failed to delete project: {str(e)}"
-
-    def get_project_data(self, project_name):
-        try:
-            data = self.projects_collection.find_one({"project_name": project_name, "email": self.email})
-            logging.debug(f"Project data for {project_name}: {data}")
-            return data
-        except Exception as e:
-            logging.error(f"Error fetching project data: {str(e)}")
-            return None
-
-    def parse_tag_string(self, tag_string):
-        if not tag_string or not isinstance(tag_string, str):
-            logging.error(f"Tag string must be a non-empty string, received: {tag_string}")
-            return None
-        return {"tag_name": tag_string.strip()}
-
-    def add_tag(self, project_name, model_name, tag_data, channel_names=None):
-        if not self.get_project_data(project_name):
-            return False, "Project not found!"
+    def add_tag(self, project_name, model_name, tag_name, channel_names=None):
         project_data = self.get_project_data(project_name)
+        if not project_data:
+            return False, "Project not found!"
         if model_name not in [m["name"] for m in project_data.get("models", [])]:
             return False, f"Model '{model_name}' not found in project!"
-        if not tag_data or "tag_name" not in tag_data:
-            logging.error(f"Invalid tag_data: {tag_data}. Must be a dictionary with a 'tag_name' key.")
-            return False, "Tag data must be a dictionary with a 'tag_name' key."
-        tag_name = tag_data.get("tag_name")
-        if not tag_name or not isinstance(tag_name, str):
-            logging.error(f"Tag name must be a non-empty string, received: {tag_name}")
-            return False, "Tag name must be a non-empty string."
+        if not tag_name:
+            return False, "Tag name cannot be empty!"
         if channel_names:
             model = next((m for m in project_data["models"] if m["name"] == model_name), None)
             model_channels = [ch["channelName"] for ch in model.get("channels", [])]
@@ -474,8 +414,8 @@ class Database:
                 {"project_name": project_name, "model_name": model_name, "tag_name": current_tag_name, "email": self.email},
                 {"$set": {"tag_name": new_tag_name}}
             )
-            self.timeview_collection.update_many(
-                {"project_name": project_name, "model_name": model_name, "topic": current_tag_name, "email": self.email},
+            self.history_collection.update_many(
+                {"projectName": project_name, "moduleName": model_name, "topic": current_tag_name, "email": self.email},
                 {"$set": {"topic": new_tag_name}}
             )
             self.tabularview_collection.update_many(
@@ -510,8 +450,8 @@ class Database:
             self.messages_collection.delete_many(
                 {"project_name": project_name, "model_name": model_name, "tag_name": tag_name, "email": self.email}
             )
-            self.timeview_collection.delete_many(
-                {"project_name": project_name, "model_name": model_name, "topic": tag_name, "email": self.email}
+            self.history_collection.delete_many(
+                {"projectName": project_name, "moduleName": model_name, "topic": tag_name, "email": self.email}
             )
             self.tabularview_collection.delete_many(
                 {"project_name": project_name, "model_name": model_name, "topic": tag_name, "email": self.email}
@@ -588,14 +528,14 @@ class Database:
             logging.error(f"Error saving tag values for {tag_name}: {str(e)}")
             return False, f"Failed to save tag values: {str(e)}"
 
-    def save_timeview_message(self, project_name, model_name, message_data):
+    def save_history_message(self, project_name, model_name, message_data):
         if not self.get_project_data(project_name):
             logging.error(f"Project {project_name} not found!")
             return False, "Project not found!"
         required_fields = ["topic", "filename", "frameIndex", "message"]
         for field in required_fields:
             if field not in message_data or message_data[field] is None:
-                logging.error(f"Missing or invalid required field {field} in timeview message")
+                logging.error(f"Missing or invalid required field {field} in history message")
                 return False, f"Missing or invalid required field: {field}"
         project_data = self.get_project_data(project_name)
         if model_name not in [m["name"] for m in project_data.get("models", [])]:
@@ -608,50 +548,52 @@ class Database:
         message_data.setdefault("samplingRate", None)
         message_data.setdefault("samplingSize", None)
         message_data.setdefault("messageFrequency", None)
-        message_data.setdefault("createdAt", datetime.datetime.now().isoformat())
-        message_data["project_name"] = project_name
-        message_data["model_name"] = model_name
+        message_data.setdefault("tacoChannelCount", 0)
+        message_data.setdefault("createdAt", datetime.datetime.utcnow().isoformat())
+        message_data.setdefault("updatedAt", datetime.datetime.utcnow().isoformat())
+        message_data["projectName"] = project_name
+        message_data["moduleName"] = model_name
         message_data["email"] = self.email
         message_data["_id"] = ObjectId()
         try:
-            result = self.timeview_collection.insert_one(message_data)
-            logging.info(f"Saved timeview message for {message_data['topic']} in {project_name}/{model_name} with filename {message_data['filename']}: {result.inserted_id}")
-            return True, "Timeview message saved successfully!"
+            result = self.history_collection.insert_one(message_data)
+            logging.info(f"Saved history message for {message_data['topic']} in {project_name}/{model_name} with filename {message_data['filename']}: {result.inserted_id}")
+            return True, "History message saved successfully!"
         except Exception as e:
-            logging.error(f"Error saving timeview message: {str(e)}")
-            return False, f"Failed to save timeview message: {str(e)}"
+            logging.error(f"Error saving history message: {str(e)}")
+            return False, f"Failed to save history message: {str(e)}"
 
-    def get_timeview_messages(self, project_name, model_name=None, topic=None, filename=None):
+    def get_history_messages(self, project_name, model_name=None, topic=None, filename=None):
         if not self.get_project_data(project_name):
             logging.error(f"Project {project_name} not found!")
             return []
-        query = {"project_name": project_name, "email": self.email}
+        query = {"projectName": project_name, "email": self.email}
         if model_name:
-            query["model_name"] = model_name
+            query["moduleName"] = model_name
         if topic:
             query["topic"] = topic
         if filename:
             query["filename"] = filename
         try:
-            messages = list(self.timeview_collection.find(query).sort("createdAt", 1))
+            messages = list(self.history_collection.find(query).sort("createdAt", 1))
             if not messages:
-                logging.debug(f"No timeview messages found for project {project_name}")
+                logging.debug(f"No history messages found for project {project_name}")
                 return []
-            logging.debug(f"Retrieved {len(messages)} timeview messages for project {project_name}")
+            logging.debug(f"Retrieved {len(messages)} history messages for project {project_name}")
             return messages
         except Exception as e:
-            logging.error(f"Error fetching timeview messages: {str(e)}")
+            logging.error(f"Error fetching history messages: {str(e)}")
             return []
 
     def get_distinct_filenames(self, project_name, model_name=None):
         if not self.get_project_data(project_name):
             logging.error(f"Project {project_name} not found!")
             return []
-        query = {"project_name": project_name, "email": self.email}
+        query = {"projectName": project_name, "email": self.email}
         if model_name:
-            query["model_name"] = model_name
+            query["moduleName"] = model_name
         try:
-            filenames = self.timeview_collection.distinct("filename", query)
+            filenames = self.history_collection.distinct("filename", query)
             sorted_filenames = sorted(filenames, key=lambda x: int(re.match(r"data(\d+)", x).group(1)) if re.match(r"data(\d+)", x) else 0)
             logging.debug(f"Retrieved {len(sorted_filenames)} distinct filenames for project {project_name}")
             return sorted_filenames

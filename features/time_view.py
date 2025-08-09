@@ -343,8 +343,8 @@ class TimeViewFeature:
             self.log_and_set_status("Cannot start saving: No project or model selected")
             return
         self.refresh_filenames()
+        self.current_filename = self.parent.sub_tool_bar.filename_edit.text() or f"data{self.filename_counter}"
         self.is_saving = True
-        self.current_filename = f"data{self.filename_counter}"
         logging.info(f"Started saving data to filename: {self.current_filename}")
         if self.console:
             self.console.append_to_console(f"Started saving data to {self.current_filename}")
@@ -437,86 +437,52 @@ class TimeViewFeature:
 
             if self.is_saving:
                 try:
+                    flattened_message = []
+                    for ch in range(self.main_channels):
+                        flattened_message.extend(list(values[ch]))
+                    if self.tacho_channels_count >= 1:
+                        flattened_message.extend(list(values[self.main_channels]))
+                    if self.tacho_channels_count >= 2:
+                        flattened_message.extend(list(values[self.main_channels + 1]))
+
                     message_data = {
                         "topic": tag_name,
                         "filename": self.current_filename,
                         "frameIndex": frame_index,
-                        "message": {
-                            "channel_data": [list(values[i]) for i in range(self.main_channels)],
-                            "tacho_freq": list(values[self.main_channels]) if self.tacho_channels_count >= 1 else [],
-                            "tacho_trigger": list(values[self.main_channels + 1]) if self.tacho_channels_count >= 2 else []
-                        },
+                        "message": flattened_message,
                         "numberOfChannels": self.main_channels,
                         "samplingRate": self.sample_rate,
                         "samplingSize": self.samples_per_channel,
                         "messageFrequency": None,
-                        "createdAt": datetime.utcnow().isoformat() + 'Z'
+                        "tacoChannelCount": self.tacho_channels_count,
+                        "createdAt": datetime.utcnow().isoformat(),
+                        "updatedAt": datetime.utcnow().isoformat()
                     }
-                    success, msg = self.db.save_timeview_message(self.project_name, self.model_name, message_data)
+                    success, msg = self.db.save_history_message(self.project_name, self.model_name, message_data)
                     if success:
                         logging.info(f"Saved data to database: {self.current_filename}, frame {frame_index}")
                         if self.console:
                             self.console.append_to_console(f"Saved data to {self.current_filename}, frame {frame_index}")
                     else:
-                        self.log_and_set_status(f"Failed to save data: {msg}")
+                        logging.error(f"Failed to save history message: {msg}")
+                        self.log_and_set_status(f"Failed to save history message: {msg}")
                 except Exception as e:
-                    self.log_and_set_status(f"Error saving data to database: {str(e)}")
+                    logging.error(f"Error saving history message: {str(e)}")
+                    self.log_and_set_status(f"Error saving history message: {str(e)}")
 
-            logging.debug(f"Updated FIFO buffers: {self.samples_per_channel} new samples, window={self.window_seconds}s")
+            self.refresh_plots()
         except Exception as e:
-            self.log_and_set_status(f"Error processing MQTT data: {str(e)}")
+            logging.error(f"Error processing data: {str(e)}")
+            self.log_and_set_status(f"Error processing data: {str(e)}")
 
     def refresh_plots(self):
         try:
-            if not self.is_initialized or self.fifo_window_samples is None or not self.plot_widgets or \
-               not self.plots or not self.fifo_data or not self.fifo_times:
-                logging.warning("Skipping plot refresh: Plots or buffers not initialized")
-                self.log_and_set_status("Cannot refresh plots: Initialization incomplete")
-                return
-
-            current_time = time.time()
-            window_start_time = current_time - self.window_seconds
-
-            for ch in range(self.num_plots):
-                if not self.needs_refresh[ch]:
-                    continue
-
-                times = self.fifo_times[ch]
-                data = self.fifo_data[ch]
-                if len(data) == 0 or len(times) == 0:
-                    self.log_and_set_status(f"No data for plot {ch}, data_len={len(data)}, times_len={len(times)}")
-                    continue
-
-                if len(times) < self.fifo_window_samples:
-                    self.log_and_set_status(f"Insufficient time data for plot {ch}: {len(times)} < {self.fifo_window_samples}")
-                    continue
-
-                mask = (times >= window_start_time) & (times <= current_time)
-                filtered_times = times[mask]
-                filtered_data = data[mask]
-
-                if len(filtered_times) == 0:
-                    self.log_and_set_status(f"No data within window for plot {ch}")
-                    continue
-
-                self.plots[ch].setData(filtered_times, filtered_data)
-                self.plot_widgets[ch].setXRange(window_start_time, current_time, padding=0.02)
-                if ch < self.main_channels:
-                    self.plot_widgets[ch].enableAutoRange(axis='y')
-                elif ch == self.main_channels:
-                    self.plot_widgets[ch].enableAutoRange(axis='y')
-                else:
-                    self.plot_widgets[ch].setYRange(-0.5, 1.5, padding=0)
-
-                self.needs_refresh[ch] = False
-
-            if any(self.needs_refresh):
-                logging.debug(f"Refreshed plots: {self.fifo_window_samples} samples, window={self.window_seconds}s")
-                if self.console:
-                    self.console.append_to_console(
-                        f"Time View ({self.model_name}): Refreshed {self.num_plots} plots with {self.fifo_window_samples} samples, window={self.window_seconds}s"
-                    )
+            for i in range(self.num_plots):
+                if self.needs_refresh[i] and len(self.fifo_data[i]) > 0:
+                    self.plots[i].setData(self.fifo_times[i], self.fifo_data[i])
+                    self.needs_refresh[i] = False
         except Exception as e:
+            logging.error(f"Error refreshing plots: {str(e)}")
             self.log_and_set_status(f"Error refreshing plots: {str(e)}")
 
     def log_and_set_status(self, message):
@@ -524,6 +490,69 @@ class TimeViewFeature:
         if self.console:
             self.console.append_to_console(message)
 
-    def close(self):
-        if self.refresh_timer:
-            self.refresh_timer.stop()
+    def load_file(self, filename):
+        try:
+            messages = self.db.get_history_messages(self.project_name, self.model_name, filename=filename)
+            if not messages:
+                self.log_and_set_status(f"No data found for filename {filename}")
+                return
+
+            message = messages[-1]
+            values = []
+            main_channels = message.get("numberOfChannels", 0)
+            tacho_channels = message.get("tacoChannelCount", 0)
+            samples_per_channel = message.get("samplingSize", 0)
+            sample_rate = message.get("samplingRate", 0)
+            frame_index = message.get("frameIndex", 0)
+            flattened_data = message.get("message", [])
+
+            if not flattened_data or not sample_rate or not samples_per_channel:
+                self.log_and_set_status(f"Invalid data in file {filename}")
+                return
+
+            total_channels = main_channels + tacho_channels
+            samples_per_channel = len(flattened_data) // total_channels if total_channels > 0 else 0
+            if samples_per_channel * total_channels != len(flattened_data):
+                self.log_and_set_status(f"Data length mismatch in file {filename}")
+                return
+
+            values = []
+            for ch in range(total_channels):
+                start_idx = ch * samples_per_channel
+                end_idx = (ch + 1) * samples_per_channel
+                values.append(flattened_data[start_idx:end_idx])
+
+            self.main_channels = main_channels
+            self.tacho_channels_count = tacho_channels
+            self.total_channels = total_channels
+            self.sample_rate = sample_rate
+            self.samples_per_channel = samples_per_channel
+
+            if not self.is_initialized or len(self.fifo_data) != self.total_channels:
+                self.initialize_plots()
+
+            current_time = time.time()
+            time_step = 1.0 / sample_rate
+            new_times = np.array([current_time - (samples_per_channel - 1 - i) * time_step for i in range(samples_per_channel)])
+
+            for ch in range(self.main_channels):
+                self.fifo_data[ch] = np.array(values[ch]) * self.scaling_factor
+                self.fifo_times[ch] = new_times
+                self.needs_refresh[ch] = True
+
+            if self.tacho_channels_count >= 1:
+                self.fifo_data[self.main_channels] = np.array(values[self.main_channels]) / 100
+                self.fifo_times[self.main_channels] = new_times
+                self.needs_refresh[self.main_channels] = True
+
+            if self.tacho_channels_count >= 2:
+                self.fifo_data[self.main_channels + 1] = np.array(values[self.main_channels + 1])
+                self.fifo_times[self.main_channels + 1] = new_times
+                self.needs_refresh[self.main_channels + 1] = True
+
+            self.refresh_plots()
+            if self.console:
+                self.console.append_to_console(f"Loaded data from {filename}, frame {frame_index}")
+        except Exception as e:
+            logging.error(f"Error loading file {filename}: {str(e)}")
+            self.log_and_set_status(f"Error loading file {filename}: {str(e)}")

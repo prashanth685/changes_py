@@ -1,4 +1,4 @@
-from PyQt5.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton, QSlider, QWidget, QHBoxLayout, QApplication
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QLabel, QPushButton, QSlider, QHBoxLayout, QApplication, QMessageBox
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtGui import QMouseEvent
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
@@ -12,14 +12,13 @@ import logging
 from database import Database
 import uuid
 import sys
-from datetime import datetime as dt
+from datetime import datetime as dt, timezone
 
-class FrequencyPlot(QDialog):
+class FrequencyPlot(QWidget):
     time_range_selected = pyqtSignal(dict)
 
     def __init__(self, parent=None, project_name=None, model_name=None, filename=None, start_time=None, end_time=None, email="user@example.com"):
         super().__init__(parent)
-        self.setWindowTitle(f"Frequency Plot - {filename}")
         self.setMinimumSize(800, 600)
         self.project_name = project_name
         self.model_name = model_name
@@ -43,7 +42,7 @@ class FrequencyPlot(QDialog):
         self.debounce_timer = QTimer()
         self.debounce_timer.setSingleShot(True)
         self.debounce_timer.timeout.connect(self.filter_and_plot_data)
-        self.debounce_delay = 200  # ms
+        self.debounce_delay = 200
         self.crosshair_state_saved = False
         self.saved_crosshair_visible = False
         self.saved_crosshair_locked = False
@@ -67,12 +66,10 @@ class FrequencyPlot(QDialog):
         self.layout.setContentsMargins(10, 10, 10, 10)
         self.layout.setSpacing(10)
 
-        # Title
         self.title_label = QLabel(f"Frequency Analysis for {self.filename}")
         self.title_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #333;")
         self.layout.addWidget(self.title_label)
 
-        # Matplotlib canvas
         self.figure = Figure()
         self.canvas = FigureCanvas(self.figure)
         self.ax = self.figure.add_subplot(111)
@@ -81,7 +78,6 @@ class FrequencyPlot(QDialog):
         self.canvas.mpl_connect('button_press_event', self.on_mouse_click)
         self.canvas.mpl_connect('axes_leave_event', self.on_mouse_leave)
 
-        # Range slider widget
         self.slider_widget = QWidget()
         self.slider_layout = QHBoxLayout()
         self.slider_widget.setLayout(self.slider_layout)
@@ -111,7 +107,6 @@ class FrequencyPlot(QDialog):
 
         self.layout.addWidget(self.slider_widget)
 
-        # Range indicator (draggable)
         self.range_indicator = QPushButton("Drag Range")
         self.range_indicator.setStyleSheet("""
             QPushButton {
@@ -130,7 +125,6 @@ class FrequencyPlot(QDialog):
         self.slider_layout.addWidget(self.range_indicator)
         self.slider_widget.mouseMoveEvent = self.range_mouse_move
 
-        # Select button
         self.select_button = QPushButton("Select")
         self.select_button.setStyleSheet("""
             QPushButton {
@@ -162,16 +156,9 @@ class FrequencyPlot(QDialog):
 
     def fetch_all_records(self):
         try:
-            query = {
-                "filename": self.filename,
-                "model_name": self.model_name,
-                "project_name": self.project_name,
-                "email": self.email
-            }
-            messages = self.db.get_timeview_messages(
+            messages = self.db.get_history_messages(
                 project_name=self.project_name,
                 model_name=self.model_name,
-                topic=None,
                 filename=self.filename
             )
             if not messages:
@@ -181,6 +168,11 @@ class FrequencyPlot(QDialog):
 
             self.current_records = sorted(messages, key=lambda x: x.get("frameIndex", 0))
             logging.info(f"Loaded {len(self.current_records)} records for {self.filename}")
+
+            if not self.start_time or not self.end_time:
+                created_times = [self.parse_time(r.get("createdAt", "")) for r in self.current_records if r.get("createdAt")]
+                self.start_time = min(created_times) if created_times else datetime.datetime.now()
+                self.end_time = max(created_times) if created_times else datetime.datetime.now()
 
             recording_duration = (self.end_time - self.start_time).total_seconds() / 60
             if recording_duration > 6:
@@ -232,273 +224,110 @@ class FrequencyPlot(QDialog):
                 self.saved_crosshair_locked = self.is_crosshair_locked
                 self.saved_crosshair_position = self.locked_crosshair_position
                 self.crosshair_state_saved = True
-                logging.info(f"Crosshair state saved - Visible: {self.saved_crosshair_visible}, Locked: {self.saved_crosshair_locked}")
+            else:
+                self.crosshair_state_saved = False
         except Exception as e:
             logging.error(f"Error saving crosshair state: {str(e)}")
 
     def restore_crosshair_state(self):
         try:
-            if not self.crosshair_state_saved or self.time_data is None or self.frequency_data is None:
-                return
-
-            self.is_crosshair_visible = self.saved_crosshair_visible
-            self.is_crosshair_locked = self.saved_crosshair_locked
-
-            if self.saved_crosshair_locked and self.saved_crosshair_position:
-                x, y = self.saved_crosshair_position
-                if self.time_data.min() <= x <= self.time_data.max():
-                    interpolated_y = self.interpolate_y_value(x)
-                    self.locked_crosshair_position = (x, interpolated_y)
-                    self.update_crosshair(self.locked_crosshair_position, is_locked=True)
-                    logging.info("Restored locked crosshair state")
-                else:
-                    self.is_crosshair_visible = False
-                    self.is_crosshair_locked = False
-                    self.update_crosshair(None, is_visible=False)
-                    logging.info("Locked crosshair position outside bounds, hiding")
-            elif self.saved_crosshair_visible and self.saved_crosshair_position:
-                x, y = self.saved_crosshair_position
-                if self.time_data.min() <= x <= self.time_data.max():
-                    interpolated_y = self.interpolate_y_value(x)
-                    self.update_crosshair((x, interpolated_y), is_locked=False)
-                    logging.info("Restored crosshair position within bounds")
-                else:
-                    self.is_crosshair_visible = False
-                    self.update_crosshair(None, is_visible=False)
-                    logging.info("Crosshair position outside bounds, hiding")
-
-            self.crosshair_state_saved = False
+            if self.crosshair_state_saved:
+                self.is_crosshair_visible = self.saved_crosshair_visible
+                self.is_crosshair_locked = self.saved_crosshair_locked
+                self.locked_crosshair_position = self.saved_crosshair_position
         except Exception as e:
             logging.error(f"Error restoring crosshair state: {str(e)}")
 
     def plot_frequency_data(self):
         try:
+            self.ax.clear()
             if not self.filtered_records:
-                logging.info("No filtered records available for plotting")
-                self.ax.clear()
                 self.canvas.draw()
                 return
 
-            first_record = self.filtered_records[0]
-            channel_count = first_record.get("numberOfChannels", 1)
-            taco_channel_count = first_record.get("tacoChannelCount", 0)
-            samples_per_channel = first_record.get("samplingRate", 1)
+            sample_rate = self.filtered_records[0].get("samplingRate", 1)
+            num_channels = self.filtered_records[0].get("numberOfChannels", 1)
+            samples_per_channel = self.filtered_records[0].get("samplingSize", 1)
+            tacho_count = self.filtered_records[0].get("tacoChannelCount", 0)
 
-            if channel_count != 4 or taco_channel_count != 2:
-                self.show_message_box(
-                    f"Expected 4 main channels and 2 tacho channels, got {channel_count} main and {taco_channel_count} tacho channels.",
-                    "Error", "error"
-                )
+            if tacho_count < 1:
+                logging.info("No tacho channel data available for frequency plot")
                 return
 
-            plot_start_time = min(r.get("createdAt", self.start_time) for r in self.filtered_records)
-            plot_end_time = max(r.get("createdAt", self.start_time) for r in self.filtered_records)
-            plot_start_time = self.parse_time(plot_start_time) if isinstance(plot_start_time, str) else plot_start_time
-            plot_end_time = self.parse_time(plot_end_time) if isinstance(plot_end_time, str) else plot_end_time
-            plot_duration = (plot_end_time - plot_start_time).total_seconds()
+            tacho_index = num_channels
+            frame_indices = [r.get("frameIndex", 0) for r in self.filtered_records]
+            created_times = [self.parse_time(r.get("createdAt", "")) for r in self.filtered_records]
+            tacho_data = []
+            for r in self.filtered_records:
+                message = r.get("message", [])
+                start_idx = tacho_index * samples_per_channel
+                end_idx = start_idx + samples_per_channel
+                tacho_data.append(np.array(message[start_idx:end_idx]) / 100)
 
-            if plot_duration <= 0:
-                plot_duration = 1.0
+            self.time_data = [mdates.date2num(t) for t in created_times]
+            self.frequency_data = [np.mean(data) for data in tacho_data]
 
-            records_with_message = [r for r in self.filtered_records if r.get("message") is not None]
-            total_samples = len(records_with_message) * samples_per_channel
-            main_channel_data_length = channel_count * samples_per_channel
+            self.ax.plot(self.time_data, self.frequency_data, 'b-', label='Tacho Frequency')
+            if self.is_crosshair_visible and not self.is_crosshair_locked:
+                self.v_line = self.ax.axvline(x=self.time_data[0], color='r', linestyle='--', visible=False)
+                self.h_line = self.ax.axhline(y=self.frequency_data[0], color='r', linestyle='--', visible=False)
+            if self.is_crosshair_locked and self.locked_crosshair_position:
+                x, y = self.locked_crosshair_position
+                self.ax.axvline(x=x, color='r', linestyle='--')
+                self.ax.axhline(y=y, color='r', linestyle='--')
 
-            if total_samples == 0:
-                self.show_message_box("No valid message data found in selected range.", "Information", "info")
-                return
-
-            max_points_to_plot = 100000
-            needs_downsampling = total_samples > max_points_to_plot
-            downsample_factor = int(np.ceil(total_samples / max_points_to_plot)) if needs_downsampling else 1
-
-            self.frequency_data = []
-            sample_index = 0
-
-            for record in records_with_message:
-                message = record.get("message", [])
-                expected_message_length = main_channel_data_length + (taco_channel_count * samples_per_channel)
-                if len(message) < expected_message_length:
-                    logging.warning(f"Invalid message length in record FrameIndex {record.get('frameIndex')}: expected {expected_message_length}, got {len(message)}")
-                    continue
-                start_index = main_channel_data_length
-                self.frequency_data.extend(message[start_index:start_index + samples_per_channel])
-                sample_index += samples_per_channel
-
-            self.frequency_data = np.array(self.frequency_data[:sample_index])
-            total_samples = len(self.frequency_data)
-
-            self.time_data = np.linspace(
-                mdates.date2num(plot_start_time),
-                mdates.date2num(plot_end_time),
-                total_samples
-            )
-
-            if needs_downsampling and total_samples > 0:
-                self.frequency_data = self.downsample_array(self.frequency_data, downsample_factor)
-                self.time_data = self.downsample_array(self.time_data, downsample_factor)
-                logging.info(f"Downsampled data to {len(self.time_data)} points")
-
-            self.ax.clear()
-            self.ax.plot(self.time_data, self.frequency_data, color='orange', linewidth=1)
-            self.ax.set_ylabel("Frequency Value")
-            self.ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
-            self.ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+            self.ax.set_xlabel('Time')
+            self.ax.set_ylabel('Frequency (Hz)')
+            self.ax.set_title(f'Frequency Plot - {self.filename}')
+            self.ax.grid(True)
+            self.ax.legend()
+            self.ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M:%S'))
             self.figure.autofmt_xdate()
-
-            if self.time_data.size > 0:
-                self.ax.set_xlim(self.time_data.min(), self.time_data.max())
-                self.ax.set_ylim(np.min(self.frequency_data), np.max(self.frequency_data))
-
-            self.save_crosshair_state()
-            self.initialize_crosshair()
-            self.restore_crosshair_state()
-
             self.canvas.draw()
-            logging.info(f"Plotted frequency data for {self.filename}: {total_samples} samples, duration {plot_duration:.2f} seconds")
         except Exception as e:
             logging.error(f"Error plotting frequency data: {str(e)}")
             self.show_message_box(f"Error plotting data: {str(e)}", "Error", "error")
 
-    def initialize_crosshair(self):
-        try:
-            if self.time_data is None or self.frequency_data is None or len(self.time_data) == 0:
-                return
-
-            self.ax.lines = [line for line in self.ax.lines if not hasattr(line, 'is_crosshair')]
-            mid_time = (self.time_data.min() + self.time_data.max()) / 2
-            mid_freq = (self.frequency_data.min() + self.frequency_data.max()) / 2
-
-            self.crosshair_vline = self.ax.axvline(mid_time, color='gray', linestyle='--', linewidth=1.5)
-            self.crosshair_hline = self.ax.axhline(mid_freq, color='gray', linestyle='--', linewidth=1.5)
-            self.crosshair_vline.is_crosshair = True
-            self.crosshair_hline.is_crosshair = True
-            self.crosshair_vline.set_visible(False)
-            self.crosshair_hline.set_visible(False)
-
-            self.intersection_point, = self.ax.plot([mid_time], [mid_freq], 'ro', markersize=6)
-            self.intersection_point.set_visible(False)
-
-            self.update_crosshair_style()
-            logging.info("Crosshair and intersection point initialized")
-        except Exception as e:
-            logging.error(f"Error initializing crosshair: {str(e)}")
-
-    def update_crosshair_style(self):
-        try:
-            if not hasattr(self, 'crosshair_vline') or not hasattr(self, 'crosshair_hline'):
-                return
-
-            if self.is_crosshair_locked:
-                self.crosshair_vline.set_linewidth(2)
-                self.crosshair_hline.set_linewidth(2)
-                self.crosshair_vline.set_color('gray')
-                self.crosshair_hline.set_color('gray')
-                self.intersection_point.set_color('green')
-                self.intersection_point.set_markersize(8)
-            else:
-                self.crosshair_vline.set_linewidth(1.5)
-                self.crosshair_hline.set_linewidth(1.5)
-                self.crosshair_vline.set_color('gray')
-                self.crosshair_hline.set_color('gray')
-                self.intersection_point.set_color('red')
-                self.intersection_point.set_markersize(6)
-        except Exception as e:
-            logging.error(f"Error updating crosshair style: {str(e)}")
-
-    def update_crosshair(self, position, is_locked=False, is_visible=True):
-        try:
-            if not hasattr(self, 'crosshair_vline') or not hasattr(self, 'crosshair_hline'):
-                return
-
-            if not is_visible:
-                self.crosshair_vline.set_visible(False)
-                self.crosshair_hline.set_visible(False)
-                self.intersection_point.set_visible(False)
-                return
-
-            x, y = position
-            self.crosshair_vline.set_xdata([x, x])
-            self.crosshair_hline.set_ydata([y, y])
-            self.crosshair_vline.set_visible(True)
-            self.crosshair_hline.set_visible(True)
-            self.intersection_point.set_data([x], [y])
-            self.intersection_point.set_visible(True)
-            self.update_crosshair_style()
-            self.canvas.draw()
-            logging.info(f"Crosshair updated at ({x:.2f}, {y:.2f}), Locked: {is_locked}")
-        except Exception as e:
-            logging.error(f"Error updating crosshair: {str(e)}")
-
-    def interpolate_y_value(self, target_x):
-        try:
-            if self.time_data is None or self.frequency_data is None or len(self.time_data) == 0:
-                return 0
-
-            if target_x <= self.time_data[0]:
-                return self.frequency_data[0]
-            if target_x >= self.time_data[-1]:
-                return self.frequency_data[-1]
-
-            left_index = np.searchsorted(self.time_data, target_x, side='left') - 1
-            if left_index < 0:
-                closest_index = np.argmin(np.abs(self.time_data - target_x))
-                return self.frequency_data[closest_index]
-
-            right_index = left_index + 1
-            x1, x2 = self.time_data[left_index], self.time_data[right_index]
-            y1, y2 = self.frequency_data[left_index], self.frequency_data[right_index]
-            interpolated_y = y1 + (y2 - y1) * (target_x - x1) / (x2 - x1)
-            return interpolated_y
-        except Exception as e:
-            logging.error(f"Error interpolating Y value: {str(e)}")
-            return 0
-
     def on_mouse_move(self, event):
-        if (datetime.datetime.now() - self.last_mouse_move).total_seconds() * 1000 < self.mouse_move_debounce_ms:
-            return
-        if self.is_crosshair_locked or not event.inaxes:
-            return
-
         try:
+            if not event.inaxes or self.is_crosshair_locked or (datetime.datetime.now() - self.last_mouse_move).total_seconds() * 1000 < self.mouse_move_debounce_ms:
+                return
+
+            self.last_mouse_move = datetime.datetime.now()
             x, y = event.xdata, event.ydata
             if x is None or y is None:
-                self.is_crosshair_visible = False
-                self.update_crosshair(None, is_visible=False)
-                self.canvas.draw()
                 return
 
-            if self.time_data.min() <= x <= self.time_data.max():
-                interpolated_y = self.interpolate_y_value(x)
+            if not self.is_crosshair_visible:
                 self.is_crosshair_visible = True
-                self.update_crosshair((x, interpolated_y), is_locked=False)
-                logging.info(f"Crosshair moved to Time: {mdates.num2date(x):%H:%M:%S.%f}, Frequency: {interpolated_y:.2f}")
+                self.v_line = self.ax.axvline(x=x, color='r', linestyle='--')
+                self.h_line = self.ax.axhline(y=y, color='r', linestyle='--')
             else:
-                self.is_crosshair_visible = False
-                self.update_crosshair(None, is_visible=False)
-            self.last_mouse_move = datetime.datetime.now()
+                self.v_line.set_xdata([x, x])
+                self.h_line.set_ydata([y, y])
+            self.canvas.draw()
         except Exception as e:
             logging.error(f"Error in mouse move: {str(e)}")
 
     def on_mouse_click(self, event):
-        if not event.inaxes or event.button != 1:
-            return
-
         try:
+            if not event.inaxes:
+                return
             x, y = event.xdata, event.ydata
             if x is None or y is None:
                 return
 
-            if self.time_data.min() <= x <= self.time_data.max():
-                interpolated_y = self.interpolate_y_value(x)
+            if event.button == 1:  # Left click
+                self.is_crosshair_locked = not self.is_crosshair_locked
                 if self.is_crosshair_locked:
-                    self.is_crosshair_locked = False
-                    logging.info("Crosshair unlocked")
+                    self.locked_crosshair_position = (x, y)
+                    self.v_line.set_xdata([x, x])
+                    self.h_line.set_ydata([y, y])
                 else:
-                    self.is_crosshair_locked = True
-                    self.locked_crosshair_position = (x, interpolated_y)
-                    logging.info(f"Crosshair locked at Time: {mdates.num2date(x):%H:%M:%S.%f}, Frequency: {interpolated_y:.2f}")
-                self.update_crosshair(self.locked_crosshair_position or (x, interpolated_y), is_locked=self.is_crosshair_locked)
+                    self.locked_crosshair_position = None
+                    self.v_line.set_visible(False)
+                    self.h_line.set_visible(False)
+                self.canvas.draw()
         except Exception as e:
             logging.error(f"Error in mouse click: {str(e)}")
 
@@ -506,40 +335,47 @@ class FrequencyPlot(QDialog):
         try:
             if self.is_crosshair_visible and not self.is_crosshair_locked:
                 self.is_crosshair_visible = False
-                self.update_crosshair(None, is_visible=False)
+                self.v_line.set_visible(False)
+                self.h_line.set_visible(False)
                 self.canvas.draw()
-                logging.info("Crosshair hidden - mouse left plot area")
         except Exception as e:
             logging.error(f"Error in mouse leave: {str(e)}")
 
     def start_range_drag(self):
-        self.is_dragging_range = True
-        self.drag_start_x = self.range_indicator.mapFromGlobal(self.cursor().pos()).x()
-        self.initial_lower_x = self.start_slider.value()
-        self.initial_upper_x = self.end_slider.value()
+        try:
+            self.is_dragging_range = True
+            self.initial_lower_x = self.lower_time_percentage
+            self.initial_upper_x = self.upper_time_percentage
+        except Exception as e:
+            logging.error(f"Error starting range drag: {str(e)}")
 
     def stop_range_drag(self):
-        self.is_dragging_range = False
-        self.debounce_timer.start(self.debounce_delay)
-
-    def range_mouse_move(self, event: QMouseEvent):
-        if not self.is_dragging_range:
-            return
-
         try:
-            current_x = event.pos().x()
-            delta_x = int(((current_x - self.drag_start_x) / self.slider_widget.width()) * 100)
+            self.is_dragging_range = False
+            self.debounce_timer.start(self.debounce_delay)
+        except Exception as e:
+            logging.error(f"Error stopping range drag: {str(e)}")
 
-            new_lower_x = self.initial_lower_x + delta_x
-            new_upper_x = self.initial_upper_x + delta_x
+    def range_mouse_move(self, event):
+        try:
+            if not self.is_dragging_range:
+                return
 
-            min_range_percentage = self.get_minimum_range_percentage()
-            max_lower_x = 100 - min_range_percentage
-            new_lower_x = max(0, min(new_lower_x, max_lower_x))
-            new_upper_x = max(new_lower_x + min_range_percentage, min(new_upper_x, 100))
+            mouse_x = event.x()
+            widget_width = self.slider_widget.width()
+            if widget_width <= 0:
+                return
 
-            self.start_slider.setValue(new_lower_x)
-            self.end_slider.setValue(new_upper_x)
+            delta_x = (mouse_x - self.drag_start_x) / widget_width * 100
+            new_lower_x = max(0, min(100, self.initial_lower_x + delta_x))
+            new_upper_x = max(0, min(100, self.initial_upper_x + delta_x))
+
+            min_range = self.get_minimum_range_percentage()
+            if new_upper_x - new_lower_x < min_range:
+                return
+
+            self.start_slider.setValue(int(new_lower_x))
+            self.end_slider.setValue(int(new_upper_x))
             self.lower_time_percentage = new_lower_x
             self.upper_time_percentage = new_upper_x
             self.update_labels()
@@ -639,7 +475,14 @@ class FrequencyPlot(QDialog):
                     "frameIndex": closest_record.get("frameIndex"),
                     "email": self.email
                 }
-                closest_record = self.db.timeview_collection.find_one(query)
+                closest_record = self.db.get_history_messages(
+                    project_name=self.project_name,
+                    model_name=self.model_name,
+                    filename=self.filename,
+                    frame_index=closest_record.get("frameIndex")
+                )
+                if closest_record:
+                    closest_record = closest_record[0]
             return closest_record
         except Exception as e:
             logging.error(f"Error finding closest record: {str(e)}")
@@ -688,7 +531,6 @@ class FrequencyPlot(QDialog):
                 f"The frequency plot will close after confirmation."
             )
 
-            from PyQt5.QtWidgets import QMessageBox
             msg = QMessageBox()
             msg.setWindowTitle("Final Confirmation - Frame Range Information")
             msg.setText(confirmation_message)
@@ -702,7 +544,8 @@ class FrequencyPlot(QDialog):
                     "model": self.model_name,
                     "frameIndex": self.selected_record.get("frameIndex"),
                     "timestamp": self.selected_record.get("createdAt"),
-                    "channelData": self.selected_record.get("message", [])
+                    "channelData": self.selected_record.get("message", []),
+                    "project_name": self.project_name
                 }
                 self.time_range_selected.emit(selected_data)
                 logging.info(f"Data confirmed for FrameIndex: {self.selected_record.get('frameIndex')}, Range: {start_frame_index} to {end_frame_index}")
@@ -713,7 +556,7 @@ class FrequencyPlot(QDialog):
                     f"The frequency plot will now close.",
                     "Selection Complete", "info"
                 )
-                self.accept()
+                self.hide()  # Hide the widget instead of closing
             else:
                 logging.info(f"User cancelled confirmation for FrameIndex: {self.selected_record.get('frameIndex')}")
         except Exception as e:
@@ -721,7 +564,6 @@ class FrequencyPlot(QDialog):
             self.show_message_box(f"Error during selection: {str(e)}", "Error", "error")
 
     def show_message_box(self, message, title, icon_type):
-        from PyQt5.QtWidgets import QMessageBox
         msg = QMessageBox()
         msg.setWindowTitle(title)
         msg.setText(message)
@@ -743,7 +585,6 @@ class FrequencyPlot(QDialog):
         return self.end_time.timestamp() if self.end_time else 0
 
 if __name__ == "__main__":
-    from datetime import timezone
     app = QApplication(sys.argv)
     window = FrequencyPlot(
         project_name="TestProject",

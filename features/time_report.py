@@ -123,7 +123,7 @@ class MouseTracker(QObject):
         return False
 
 class TimeReportFeature:
-    def __init__(self, parent, db, project_name, channel=None, model_name=None, console=None):
+    def __init__(self, parent, db, project_name, channel=None, model_name=None, console=None, filename=None):
         self.parent = parent
         self.db = db
         self.project_name = project_name
@@ -141,18 +141,18 @@ class TimeReportFeature:
         self.trackers = []
         self.trigger_lines = []
         self.active_line_idx = None
-        self.num_channels = 0  # Will be set dynamically
-        self.num_plots = 0     # Will be set dynamically
-        self.tacho_channels_count = 2  # Matches time_view.py
+        self.num_channels = 0
+        self.num_plots = 0
+        self.tacho_channels_count = 2
         self.sample_rate = None
         self.filenames = []
-        self.selected_filename = None
+        self.selected_filename = filename
         self.file_start_time = None
         self.file_end_time = None
         self.start_time = None
         self.end_time = None
         self.use_full_range = True
-        self.scaling_factor = 3.3 / 65535  # Matches time_view.py
+        self.scaling_factor = 3.3 / 65535
         self.init_ui_deferred()
 
     def init_ui_deferred(self):
@@ -341,6 +341,9 @@ class TimeReportFeature:
     def load_data_async(self):
         try:
             self.refresh_filenames()
+            if self.selected_filename:
+                self.file_combo.setCurrentText(self.selected_filename)
+                self.load_file(self.selected_filename)
         except Exception as e:
             logging.error(f"Error in async data loading: {str(e)}")
             if self.console:
@@ -351,7 +354,6 @@ class TimeReportFeature:
         self.tacho_channels_count = tacho_channels_count
         self.num_plots = num_channels + tacho_channels_count
 
-        # Clear existing plots
         self.plot_widgets = []
         self.plots = []
         self.data = []
@@ -360,7 +362,6 @@ class TimeReportFeature:
         self.trackers = []
         self.trigger_lines = []
 
-        # Clear scroll content
         self.scroll_content = QWidget()
         self.scroll_layout = QVBoxLayout(self.scroll_content)
         self.scroll_area.setWidget(self.scroll_content)
@@ -435,6 +436,8 @@ class TimeReportFeature:
                 self.time_slider.setEnabled(True)
                 self.ok_button.setEnabled(True)
                 self.file_combo.setEnabled(True)
+                if self.selected_filename and self.selected_filename in self.filenames:
+                    self.file_combo.setCurrentText(self.selected_filename)
                 self.update_time_labels(self.file_combo.currentText())
                 if self.console:
                     self.console.append_to_console(f"Refreshed filenames: {len(self.filenames)} found")
@@ -478,7 +481,7 @@ class TimeReportFeature:
             return
 
         try:
-            messages = self.db.get_timeview_messages(
+            messages = self.db.get_history_messages(
                 self.project_name,
                 model_name=self.model_name,
                 filename=filename
@@ -617,16 +620,95 @@ class TimeReportFeature:
         self.trigger_lines = [None] * (self.num_plots - 1) + [[]]
         logging.debug("Cleared all plots")
 
+    def load_file(self, filename):
+        try:
+            messages = self.db.get_history_messages(self.project_name, self.model_name, filename=filename)
+            if not messages:
+                self.clear_plots()
+                if self.console:
+                    self.console.append_to_console(f"No data found for filename {filename}")
+                return
+
+            messages.sort(key=lambda x: datetime.fromisoformat(x['createdAt'].replace('Z', '+00:00')).timestamp())
+            message = messages[-1]
+            main_channels = message.get("numberOfChannels", 0)
+            tacho_channels = message.get("tacoChannelCount", 0)
+            samples_per_channel = message.get("samplingSize", 0)
+            sample_rate = message.get("samplingRate", 0)
+            frame_index = message.get("frameIndex", 0)
+            flattened_data = message.get("message", [])
+
+            if not flattened_data or not sample_rate or not samples_per_channel:
+                self.clear_plots()
+                if self.console:
+                    self.console.append_to_console(f"Invalid data in file {filename}")
+                return
+
+            total_channels = main_channels + tacho_channels
+            expected_length = samples_per_channel * total_channels
+            if len(flattened_data) != expected_length:
+                self.clear_plots()
+                if self.console:
+                    self.console.append_to_console(f"Data length mismatch in file {filename}: expected {expected_length}, got {len(flattened_data)}")
+                return
+
+            values = []
+            for ch in range(total_channels):
+                start_idx = ch * samples_per_channel
+                end_idx = (ch + 1) * samples_per_channel
+                values.append(flattened_data[start_idx:end_idx])
+
+            self.num_channels = main_channels
+            self.tacho_channels_count = tacho_channels
+            self.num_plots = total_channels
+            self.sample_rate = sample_rate
+
+            self.init_plots(main_channels, tacho_channels)
+
+            created_at = datetime.fromisoformat(message['createdAt'].replace('Z', '+00:00')).timestamp()
+            time_step = 1.0 / sample_rate
+            times = np.array([created_at + i * time_step for i in range(samples_per_channel)])
+
+            self.data = []
+            for ch in range(total_channels):
+                data = np.array(values[ch])
+                if ch < main_channels:
+                    data = data * self.scaling_factor
+                elif ch == main_channels:
+                    data = data / 100
+                self.data.append(data)
+            self.channel_times = times
+            self.tacho_times = times
+
+            self.update_time_labels(filename)
+            if self.use_full_range:
+                self.start_time = min(times)
+                self.end_time = max(times)
+                self.start_time_edit.blockSignals(True)
+                self.end_time_edit.blockSignals(True)
+                self.start_time_edit.setDateTime(QDateTime(self.file_start_time))
+                self.end_time_edit.setDateTime(QDateTime(self.file_end_time))
+                self.time_slider.setValues(0, 1000)
+                self.start_time_edit.blockSignals(False)
+                self.end_time_edit.blockSignals(False)
+
+            self.plot_data()
+            if self.console:
+                self.console.append_to_console(f"Loaded and plotted data from {filename}, frame {frame_index}")
+        except Exception as e:
+            logging.error(f"Error loading file {filename}: {str(e)}")
+            self.clear_plots()
+            if self.console:
+                self.console.append_to_console(f"Error loading file {filename}: {str(e)}")
+
     def plot_data(self):
-        """Plot data for the selected file and time range with a progress dialog."""
-        filename = self.file_combo.currentText()
+        filename = self.selected_filename or self.file_combo.currentText()
         if not filename or filename in ["No Files Available", "Error Loading Files"]:
             self.clear_plots()
             if self.console:
                 self.console.append_to_console("No valid file selected to plot.")
             return
 
-        # Initialize progress dialog
         progress = QProgressDialog("Loading and plotting data...", "Cancel", 0, 100, self.widget)
         progress.setWindowModality(Qt.WindowModal)
         progress.setMinimumDuration(0)
@@ -635,10 +717,9 @@ class TimeReportFeature:
         QApplication.processEvents()
 
         try:
-            # Fetch messages
             progress.setLabelText("Fetching data from database...")
             progress.setValue(10)
-            messages = self.db.get_timeview_messages(
+            messages = self.db.get_history_messages(
                 self.project_name,
                 model_name=self.model_name,
                 filename=filename
@@ -651,34 +732,61 @@ class TimeReportFeature:
                     self.console.append_to_console(f"No data found for filename {filename}")
                 return
 
-            # Sort messages by timestamp to ensure chronological order
             progress.setLabelText("Sorting messages...")
             progress.setValue(15)
             messages.sort(key=lambda x: datetime.fromisoformat(x['createdAt'].replace('Z', '+00:00')).timestamp())
+            message = messages[-1]  # Use the latest message, as in time_view.py
 
-            # Determine number of channels dynamically
-            first_msg = messages[0]
-            num_channels = first_msg.get('numberOfChannels', 0)
-            tacho_channels_count = self.tacho_channels_count
-            if not num_channels or len(first_msg['message']['channel_data']) != num_channels:
+            progress.setLabelText("Processing message data...")
+            progress.setValue(20)
+            main_channels = message.get("numberOfChannels", 0)
+            tacho_channels = message.get("tacoChannelCount", 0)
+            samples_per_channel = message.get("samplingSize", 0)
+            sample_rate = message.get("samplingRate", 0)
+            frame_index = message.get("frameIndex", 0)
+            flattened_data = message.get("message", [])
+
+            if not flattened_data or not sample_rate or not samples_per_channel:
                 self.clear_plots()
                 progress.setValue(100)
                 progress.close()
                 if self.console:
-                    self.console.append_to_console(f"Invalid channel data in {filename}")
+                    self.console.append_to_console(f"Invalid data in file {filename}")
                 return
 
-            # Initialize plots with dynamic channel counts
+            total_channels = main_channels + tacho_channels
+            expected_length = samples_per_channel * total_channels
+            if len(flattened_data) != expected_length:
+                self.clear_plots()
+                progress.setValue(100)
+                progress.close()
+                if self.console:
+                    self.console.append_to_console(f"Data length mismatch in file {filename}: expected {expected_length}, got {len(flattened_data)}")
+                return
+
+            progress.setLabelText("Unflattening data...")
+            progress.setValue(30)
+            values = []
+            for ch in range(total_channels):
+                start_idx = ch * samples_per_channel
+                end_idx = (ch + 1) * samples_per_channel
+                values.append(flattened_data[start_idx:end_idx])
+
             progress.setLabelText("Initializing plots...")
-            progress.setValue(20)
-            self.init_plots(num_channels, tacho_channels_count)
+            progress.setValue(40)
+            self.sample_rate = sample_rate
+            self.init_plots(main_channels, tacho_channels)
 
             if self.use_full_range:
                 self.start_time = self.file_start_time.timestamp()
                 self.end_time = self.file_end_time.timestamp()
+                self.start_time_edit.blockSignals(True)
+                self.end_time_edit.blockSignals(True)
                 self.start_time_edit.setDateTime(QDateTime(self.file_start_time))
                 self.end_time_edit.setDateTime(QDateTime(self.file_end_time))
                 self.time_slider.setValues(0, 1000)
+                self.start_time_edit.blockSignals(False)
+                self.end_time_edit.blockSignals(False)
 
             if self.start_time >= self.end_time:
                 self.clear_plots()
@@ -688,15 +796,14 @@ class TimeReportFeature:
                     self.console.append_to_console("Error: Start time must be before end time.")
                 return
 
-            # Filter messages by time range
-            progress.setLabelText("Filtering messages by time range...")
-            progress.setValue(25)
-            filtered_messages = [
-                msg for msg in messages
-                if self.start_time <= datetime.fromisoformat(msg['createdAt'].replace('Z', '+00:00')).timestamp() <= self.end_time
-            ]
+            progress.setLabelText("Generating time arrays...")
+            progress.setValue(50)
+            created_at = datetime.fromisoformat(message['createdAt'].replace('Z', '+00:00')).timestamp()
+            time_step = 1.0 / sample_rate
+            times = np.array([created_at + i * time_step for i in range(samples_per_channel)])
+            time_mask = (times >= self.start_time) & (times <= self.end_time)
 
-            if not filtered_messages:
+            if not np.any(time_mask):
                 self.clear_plots()
                 progress.setValue(100)
                 progress.close()
@@ -704,98 +811,24 @@ class TimeReportFeature:
                     self.console.append_to_console(f"No data within time range for filename {filename}")
                 return
 
-            # Initialize data arrays
-            progress.setLabelText("Preparing data arrays...")
-            progress.setValue(30)
-            channel_data_agg = [[] for _ in range(self.num_channels)]
-            tacho_freq_agg = []
-            tacho_trigger_agg = []
-            channel_times_agg = []
-            tacho_times_agg = []
-            self.sample_rate = filtered_messages[0].get('samplingRate', 4096)
-            total_messages = len(filtered_messages)
+            progress.setLabelText("Filtering data by time range...")
+            progress.setValue(60)
+            filtered_times = times[time_mask]
+            filtered_data = []
+            for ch in range(total_channels):
+                data = np.array(values[ch])[time_mask]
+                if ch < main_channels:
+                    data = data * self.scaling_factor
+                elif ch == main_channels:
+                    data = data / 100
+                filtered_data.append(data)
 
-            # Process messages
-            progress.setLabelText("Processing messages...")
-            for i, msg in enumerate(filtered_messages):
-                progress.setValue(30 + int((i / total_messages) * 50))  # 30% to 80%
-                QApplication.processEvents()
-                if progress.wasCanceled():
-                    self.clear_plots()
-                    progress.close()
-                    return
-
-                created_at = datetime.fromisoformat(msg['createdAt'].replace('Z', '+00:00')).timestamp()
-                channel_data = msg['message']['channel_data']
-                tacho_freq = msg['message']['tacho_freq']
-                tacho_trigger = msg['message']['tacho_trigger']
-                channel_samples = msg.get('samplingSize', 4096)
-                tacho_samples = len(tacho_freq)
-
-                if len(channel_data) != self.num_channels or len(tacho_freq) != tacho_samples or len(tacho_trigger) != tacho_samples:
-                    if self.console:
-                        self.console.append_to_console(f"Data length mismatch in message at {created_at} for {filename}")
-                    continue
-
-                # Calculate time arrays in ascending order
-                channel_time_step = 1.0 / self.sample_rate
-                tacho_time_step = 1.0 / self.sample_rate
-                channel_times = np.array([
-                    created_at + i * channel_time_step
-                    for i in range(channel_samples)
-                ])
-                tacho_times = np.array([
-                    created_at + i * tacho_time_step
-                    for i in range(tacho_samples)
-                ])
-
-                # Filter by time range
-                channel_mask = (channel_times >= self.start_time) & (channel_times <= self.end_time)
-                tacho_mask = (tacho_times >= self.start_time) & (tacho_times <= self.end_time)
-
-                # Ensure data is appended in chronological order
-                for ch in range(self.num_channels):
-                    filtered_data = np.array(channel_data[ch])[channel_mask] * self.scaling_factor
-                    if len(filtered_data) > 0:
-                        channel_data_agg[ch].extend(filtered_data)
-                filtered_tacho_freq = np.array(tacho_freq)[tacho_mask] / 100  # Matches time_view.py scaling
-                if len(filtered_tacho_freq) > 0:
-                    tacho_freq_agg.extend(filtered_tacho_freq)
-                filtered_tacho_trigger = np.array(tacho_trigger)[tacho_mask]
-                if len(filtered_tacho_trigger) > 0:
-                    tacho_trigger_agg.extend(filtered_tacho_trigger)
-                filtered_channel_times = channel_times[channel_mask]
-                if len(filtered_channel_times) > 0:
-                    channel_times_agg.extend(filtered_channel_times)
-                filtered_tacho_times = tacho_times[tacho_mask]
-                if len(filtered_tacho_times) > 0:
-                    tacho_times_agg.extend(filtered_tacho_times)
-
-            # Sort aggregated times to ensure chronological order
-            if channel_times_agg:
-                channel_sort_indices = np.argsort(channel_times_agg)
-                channel_times_agg = np.array(channel_times_agg)[channel_sort_indices]
-                for ch in range(self.num_channels):
-                    if channel_data_agg[ch]:
-                        channel_data_agg[ch] = np.array(channel_data_agg[ch])[channel_sort_indices]
-            if tacho_times_agg:
-                tacho_sort_indices = np.argsort(tacho_times_agg)
-                tacho_times_agg = np.array(tacho_times_agg)[tacho_sort_indices]
-                tacho_freq_agg = np.array(tacho_freq_agg)[tacho_sort_indices]
-                tacho_trigger_agg = np.array(tacho_trigger_agg)[tacho_sort_indices]
-
-            # Assign data to plots
             progress.setLabelText("Assigning data to plots...")
             progress.setValue(80)
-            for ch in range(self.num_channels):
-                self.data[ch] = np.array(channel_data_agg[ch])
-            self.data[self.num_channels] = np.array(tacho_freq_agg)
-            if self.tacho_channels_count >= 2:
-                self.data[self.num_plots - 1] = np.array(tacho_trigger_agg)
-            self.channel_times = np.array(channel_times_agg)
-            self.tacho_times = np.array(tacho_times_agg)
+            self.data = filtered_data
+            self.channel_times = filtered_times
+            self.tacho_times = filtered_times
 
-            # Clear and update plots
             progress.setLabelText("Updating plots...")
             progress.setValue(90)
             for widget in self.plot_widgets:
@@ -805,22 +838,20 @@ class TimeReportFeature:
                 if widget.getAxis('left').labelText.startswith('Tacho Trigger'):
                     widget.setYRange(-0.5, 1.5, padding=0)
 
-            colors = ['r', 'g', 'b', 'y', 'c', 'm', 'k', 'w', '#FF4500', '#32CD32', '#00CED1', '#FFD700', '#FF69B4', '#8A2BE2', '#FF6347', '#20B2AA', '#ADFF2F', '#9932CC', '#FF7F50', '#00FA9A', '#9400D3']
+            colors = ['r', 'g', 'b', 'y', 'c', 'm', 'k', '#FF4500', '#32CD32', '#00CED1', '#FFD700', '#FF69B4', '#8A2BE2', '#FF6347', '#20B2AA', '#ADFF2F', '#9932CC', '#FF7F50', '#00FA9A', '#9400D3']
             for ch in range(self.num_plots):
-                times = self.tacho_times if ch >= self.num_channels else self.channel_times
-                if len(self.data[ch]) > 0 and len(times) > 0:
+                if len(self.data[ch]) > 0 and len(self.channel_times) > 0:
                     pen = mkPen(color=colors[ch % len(colors)], width=2)
-                    self.plots[ch] = self.plot_widgets[ch].plot(times, self.data[ch], pen=pen)
+                    self.plots[ch].setData(self.channel_times, self.data[ch], pen=pen)
                     self.plot_widgets[ch].setXRange(self.start_time, self.end_time, padding=0)
-                    if ch < self.num_channels:
+                    if ch < self.num_channels or ch == self.num_channels:
                         self.plot_widgets[ch].enableAutoRange(axis='y')
-                    elif ch == self.num_channels:
-                        self.plot_widgets[ch].enableAutoRange(axis='y')
+                    if self.console:
+                        self.console.append_to_console(f"Plotted {len(self.data[ch])} points for plot {ch}")
                 else:
                     if self.console:
-                        self.console.append_to_console(f"No data for plot {ch} in time range")
+                        self.console.append_to_console(f"Skipping plot {ch}: data length={len(self.data[ch])}, times length={len(self.channel_times)}")
 
-            # Add trigger lines
             if self.tacho_channels_count >= 2 and len(self.data[self.num_plots - 1]) > 0 and len(self.tacho_times) > 0:
                 trigger_indices = np.where(self.data[self.num_plots - 1] == 1)[0]
                 self.trigger_lines = [None] * (self.num_plots - 1) + [[]]
@@ -838,7 +869,7 @@ class TimeReportFeature:
             progress.setValue(100)
             progress.close()
             if self.console:
-                self.console.append_to_console(f"Time Report ({self.model_name}): Plotted {self.num_plots} plots for {filename}")
+                self.console.append_to_console(f"Time Report ({self.model_name}): Plotted {self.num_plots} plots for {filename}, frame {frame_index}")
         except Exception as e:
             logging.error(f"Error plotting data: {str(e)}")
             self.clear_plots()
