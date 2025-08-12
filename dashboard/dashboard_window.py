@@ -8,6 +8,7 @@ from dashboard.components.file_bar import FileBar
 from dashboard.components.tool_bar import ToolBar
 from dashboard.components.sub_tool_bar import SubToolBar
 from dashboard.components.main_section import MainSection
+from dashboard.components.frequencyplot import FrequencyPlot
 from dashboard.components.tree_view import TreeView
 from dashboard.components.console import Console
 from dashboard.components.mqtt_status import MQTTStatus
@@ -29,6 +30,8 @@ from select_project import SelectProjectWidget
 from create_project import CreateProjectWidget
 from project_structure import ProjectStructureWidget
 import time
+import re
+from datetime import datetime
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -77,6 +80,7 @@ class DashboardWindow(QWidget):
         self.select_project_widget = None
         self.create_project_widget = None
         self.project_structure_widget = None
+        self.saving_filenames = {}
         self.initUI()
         self.deferred_initialization()
 
@@ -159,6 +163,7 @@ class DashboardWindow(QWidget):
         self.sub_tool_bar.stop_saving_triggered.connect(self.stop_saving)
         self.sub_tool_bar.connect_mqtt_triggered.connect(self.connect_mqtt)
         self.sub_tool_bar.disconnect_mqtt_triggered.connect(self.disconnect_mqtt)
+        self.sub_tool_bar.open_file_triggered.connect(self.handle_open_file)
         central_widget = QWidget()
         central_layout = QVBoxLayout()
         central_layout.setContentsMargins(0, 0, 0, 0)
@@ -212,6 +217,19 @@ class DashboardWindow(QWidget):
         self.thread.finished.connect(self.thread.deleteLater)
         self.worker.select_project.connect(self.display_select_project)
         self.thread.start()
+
+    def display_dashboard(self):
+        self.clear_content_layout()
+        self.tree_view.setVisible(False)
+        self.sub_tool_bar.setVisible(False)
+        self.current_project = None
+        self.channel_count = None
+        self.file_bar.update_state(project_name=None)
+        self.project_changed.emit(None)
+        self.setWindowTitle('Sarayu Desktop Application')
+        self.select_project_widget = SelectProjectWidget(self)
+        self.main_section.set_widget(self.select_project_widget)
+        logging.debug("Displayed dashboard with SelectProjectWidget in MainSection")
 
     def display_select_project(self):
         self.clear_content_layout()
@@ -352,6 +370,41 @@ class DashboardWindow(QWidget):
 
     def on_data_received(self, feature_name, tag_name, model_name, channel_index, values, sample_rate, frame_index):
         try:
+            if model_name in self.saving_filenames:
+                filename = self.saving_filenames[model_name]
+                main_channels = len(values) - 2 if len(values) >= 2 else 0
+                tacho_count = 2 if len(values) >= 2 else 0
+                samples_per_channel = len(values[0]) if values else 0
+                flattened_message = []
+                for ch in range(main_channels):
+                    flattened_message.extend(list(values[ch]))
+                if tacho_count >= 1:
+                    flattened_message.extend(list(values[main_channels]))
+                if tacho_count >= 2:
+                    flattened_message.extend(list(values[main_channels + 1]))
+
+                message_data = {
+                    "topic": tag_name,
+                    "filename": filename,
+                    "frameIndex": frame_index,
+                    "message": flattened_message,
+                    "numberOfChannels": main_channels,
+                    "samplingRate": sample_rate,
+                    "samplingSize": samples_per_channel,
+                    "messageFrequency": None,
+                    "tacoChannelCount": tacho_count,
+                    "createdAt": datetime.datetime.now().isoformat(),
+                    "updatedAt": datetime.datetime.now().isoformat()
+                }
+                success, msg = self.db.save_history_message(self.current_project, model_name, message_data)
+                if success:
+                    logging.info(f"Saved data to database: {filename}, frame {frame_index}")
+                    if self.console:
+                        self.console.append_to_console(f"Saved data to {filename}, frame {frame_index}")
+                else:
+                    logging.error(f"Failed to save history message: {msg}")
+                    self.console.append_to_console(f"Failed to save history message: {msg}")
+
             for key, feature_instance in self.feature_instances.items():
                 instance_feature, instance_model, instance_channel, _ = key
                 if (instance_feature == feature_name and instance_model == model_name and
@@ -444,92 +497,44 @@ class DashboardWindow(QWidget):
                 "DAQ8CH": 8,
                 "DAQ10CH": 10
             }
-            required_channels = valid_channel_counts.get(channel_count)
-            if not required_channels:
-                try:
-                    required_channels = int(channel_count)
-                    if required_channels not in [4, 8, 10]:
-                        raise ValueError(f"Invalid channel count: {channel_count}")
-                except (ValueError, TypeError):
-                    QMessageBox.warning(self, "Error", f"Invalid channel count: {channel_count}")
-                    return
-            for model in updated_models:
-                if len(model.get("channels", [])) != required_channels:
-                    model_channels = model.get("channels", [])
-                    if len(model_channels) < required_channels:
-                        model_channels.extend([
-                            {
-                                "channelName": f"Channel_{j+1}",
-                                "type": "Displacement",
-                                "sensitivity": "1.0",
-                                "unit": "mil",
-                                "correctionValue": "",
-                                "gain": "",
-                                "unitType": "",
-                                "angle": "",
-                                "angleDirection": "Right",
-                                "shaft": ""
-                            } for j in range(len(model_channels), required_channels)
-                        ])
-                    elif len(model_channels) > required_channels:
-                        model_channels = model_channels[:required_channels]
-                    model["channels"] = model_channels
-            success, message = self.db.edit_project(self.current_project, new_project_name, updated_models, channel_count)
+            required_channels = valid_channel_counts.get(channel_count, 4)
+            project_data = {
+                "name": new_project_name,
+                "channel_count": channel_count,
+                "models": updated_models
+            }
+            success, message = self.db.update_project(self.current_project, project_data)
             if success:
                 self.current_project = new_project_name
                 self.channel_count = required_channels
                 self.setWindowTitle(f'Sarayu Desktop Application - {self.current_project.upper()}')
-                self.load_project(new_project_name)
-                if self.current_feature:
-                    self.display_feature_content(self.current_feature)
-                for key, instance in self.feature_instances.items():
-                    if hasattr(instance, 'refresh_channel_properties'):
-                        instance.refresh_channel_properties()
-                QMessageBox.information(self, "Success", message)
+                self.load_project_features()
                 self.file_bar.update_state(project_name=new_project_name)
                 self.project_changed.emit(new_project_name)
-                self.display_select_project()
-                self.console.append_to_console(f"Project updated: {new_project_name} with {required_channels} channels")
+                self.console.append_to_console(f"Project {new_project_name} updated successfully.")
+                logging.info(f"Project {new_project_name} updated successfully")
+                self.display_dashboard()
             else:
-                QMessageBox.warning(self, "Error", message)
+                self.console.append_to_console(f"Error updating project: {message}")
+                logging.error(f"Error updating project: {message}")
+                QMessageBox.warning(self, "Error", f"Error updating project: {message}")
         except Exception as e:
-            logging.error(f"Error handling edited project: {str(e)}")
-            QMessageBox.warning(self, "Error", f"Error saving edited project: {str(e)}")
+            logging.error(f"Error handling project edit: {str(e)}")
+            QMessageBox.warning(self, "Error", f"Error updating project: {str(e)}")
 
-    def edit_channel_dialog(self):
-        selected_model = self.tree_view.get_selected_model()
-        selected_channel = self.tree_view.get_selected_channel()
-        if not selected_model or not selected_channel:
-            QMessageBox.warning(self, "Error", "Please select a channel to edit!")
-            return
-        project_data = self.db.get_project_data(self.current_project)
-        if not project_data:
-            QMessageBox.warning(self, "Error", "Project data not found!")
-            return
-        model = next((m for m in project_data["models"] if m["name"] == selected_model), None)
-        if not model:
-            QMessageBox.warning(self, "Error", f"Model '{selected_model}' not found!")
-            return
-        channel = next((c for c in model["channels"] if c["channelName"] == selected_channel), None)
-        if not channel:
-            QMessageBox.warning(self, "Error", f"Channel '{selected_channel}' not found!")
-            return
-        properties = ["type", "sensitivity", "unit", "correctionValue", "gain", "unitType", "angle", "angleDirection", "shaft"]
-        updated_properties = {}
-        for prop in properties:
-            value, ok = QInputDialog.getText(self, f"Edit {prop.capitalize()}", f"Enter new {prop.capitalize()} (current: {channel.get(prop, 'None')})")
-            if ok and value:
-                updated_properties[prop] = value
-        if updated_properties:
-            success, message = self.db.update_channel_properties(self.current_project, selected_model, selected_channel, updated_properties)
-            if success:
-                QMessageBox.information(self, "Success", message)
-                for key, instance in self.feature_instances.items():
-                    if hasattr(instance, 'refresh_channel_properties'):
-                        instance.refresh_channel_properties()
-                self.load_project_features()
+    def get_next_filename(self, model_name):
+        try:
+            filenames = self.db.get_distinct_filenames(self.current_project, model_name)
+            logging.debug(f"Retrieved filenames from database: {filenames}")
+            if filenames:
+                numbers = [int(re.match(r"data(\d+)", f).group(1)) for f in filenames if re.match(r"data(\d+)", f)]
+                return f"data{max(numbers, default=0) + 1}"
             else:
-                QMessageBox.warning(self, "Error", message)
+                return "data1"
+        except Exception as e:
+            self.console.append_to_console(f"Error refreshing filenames: {str(e)}")
+            logging.error(f"Error refreshing filenames: {str(e)}")
+            return "data1"
 
     def start_saving(self):
         selected_model = self.tree_view.get_selected_model()
@@ -539,55 +544,63 @@ class DashboardWindow(QWidget):
         if not self.current_project:
             QMessageBox.warning(self, "Error", "No project selected!")
             return
+        if selected_model in self.saving_filenames:
+            QMessageBox.warning(self, "Error", f"Already saving data for model {selected_model}!")
+            return
         time_view_keys = [k for k in self.feature_instances.keys() if k[0] == "Time View" and k[1] == selected_model]
-        if time_view_keys:
-            key = max(time_view_keys, key=lambda k: k[3])
-            feature_instance = self.feature_instances.get(key)
-            try:
-                feature_instance.start_saving()
-                self.is_saving = True
-                self.saving_state_changed.emit(True)
-                logging.info("Started saving data from existing TimeViewFeature")
-            except Exception as e:
-                logging.error(f"Failed to start saving: {str(e)}")
-                QMessageBox.warning(self, "Error", f"Failed to start saving: {str(e)}")
-        else:
-            try:
-                if not self.db.is_connected():
-                    self.db.reconnect()
-                unique_id = int(time.time() * 1000)
-                key = ("Time View", selected_model, None, unique_id)
-                feature_instance = TimeViewFeature(
-                    self, self.db, self.current_project, model_name=selected_model, console=self.console
+        if not time_view_keys:
+            unique_id = int(time.time() * 1000)
+            key = ("Time View", selected_model, None, unique_id)
+            feature_instance = TimeViewFeature(
+                self, self.db, self.current_project, model_name=selected_model, console=self.console
+            )
+            self.feature_instances[key] = feature_instance
+            widget = feature_instance.get_widget()
+            if widget:
+                sub_window = self.main_section.add_subwindow(
+                    widget,
+                    "Time View",
+                    model_name=selected_model
                 )
-                self.feature_instances[key] = feature_instance
-                feature_instance.start_saving()
-                self.is_saving = True
-                self.saving_state_changed.emit(True)
-                logging.info(f"Created new TimeViewFeature for saving data, key: {key}")
-            except Exception as e:
-                logging.error(f"Failed to create and start saving with new TimeViewFeature: {str(e)}")
-                QMessageBox.warning(self, "Error", f"Failed to start saving: {str(e)}")
+                if sub_window:
+                    self.sub_windows[key] = sub_window
+                    sub_window.closeEvent = lambda event, k=key: self.on_subwindow_closed(event, k)
+                    sub_window.show()
+                    self.main_section.arrange_layout()
+                    logging.debug(f"Created new Time View subwindow for saving data, key: {key}")
+                else:
+                    logging.error(f"Failed to create subwindow for Time View/{selected_model}")
+                    del self.feature_instances[key]
+                    return
+            else:
+                logging.error(f"Time View returned invalid widget")
+                del self.feature_instances[key]
+                return
+        filename = self.sub_tool_bar.filename_edit.text()
+        if not filename:
+            filename = self.get_next_filename(selected_model)
+        self.saving_filenames[selected_model] = filename
+        self.is_saving = bool(self.saving_filenames)
+        self.saving_state_changed.emit(self.is_saving)
+        logging.info(f"Started saving data to filename: {filename} for model {selected_model}")
+        if self.console:
+            self.console.append_to_console(f"Started saving data to {filename} for model {selected_model}")
 
     def stop_saving(self):
         selected_model = self.tree_view.get_selected_model()
         if not selected_model:
             QMessageBox.warning(self, "Error", "Please select a model to stop saving!")
             return
-        time_view_keys = [k for k in self.feature_instances.keys() if k[0] == "Time View" and k[1] == selected_model]
-        if not time_view_keys:
-            QMessageBox.warning(self, "Error", "No Time View feature initialized for the selected model!")
+        if selected_model not in self.saving_filenames:
+            QMessageBox.warning(self, "Error", f"Not saving data for model {selected_model}!")
             return
-        key = max(time_view_keys, key=lambda k: k[3])
-        feature_instance = self.feature_instances.get(key)
-        try:
-            feature_instance.stop_saving()
-            self.is_saving = False
-            self.saving_state_changed.emit(False)
-            logging.info("Stopped saving data from dashboard")
-        except Exception as e:
-            logging.error(f"Failed to stop saving: {str(e)}")
-            QMessageBox.warning(self, "Error", f"Failed to stop saving: {str(e)}")
+        del self.saving_filenames[selected_model]
+        self.is_saving = bool(self.saving_filenames)
+        self.saving_state_changed.emit(self.is_saving)
+        logging.info(f"Stopped saving data for model {selected_model}")
+        if self.console:
+            self.console.append_to_console(f"Stopped saving data for model {selected_model}")
+        self.sub_tool_bar.refresh_filename()
 
     def display_feature_content(self, feature_name):
         try:
@@ -698,6 +711,32 @@ class DashboardWindow(QWidget):
             logging.error(f"Error displaying feature content: {str(e)}")
             QMessageBox.warning(self, "Error", f"Error displaying feature: {str(e)}")
 
+    def handle_open_file(self, file_data):
+        try:
+            freq_plot = FrequencyPlot(
+                parent=self,
+                project_name=file_data["project_name"],
+                model_name=file_data["model_name"],
+                filename=file_data["filename"],
+                email=self.email
+            )
+            sub_window = self.main_section.add_subwindow(
+                freq_plot,
+                "Frequency Plot",
+                model_name=file_data["model_name"],
+                channel_name=file_data["filename"]
+            )
+            if sub_window:
+                sub_window.closeEvent = lambda event: self.on_subwindow_closed(event, ("Frequency Plot", file_data["model_name"], file_data["filename"], id(freq_plot)))
+                sub_window.show()
+                self.main_section.arrange_layout()
+                logging.debug(f"Opened FrequencyPlot for {file_data}")
+            else:
+                logging.error(f"Failed to open FrequencyPlot subwindow for {file_data}")
+        except Exception as e:
+            logging.error(f"Error handling open file: {str(e)}")
+            QMessageBox.warning(self, "Error", f"Failed to open file: {str(e)}")
+
     def on_subwindow_closed(self, event, key):
         try:
             feature_name, model_name, channel_name, unique_id = key
@@ -752,7 +791,6 @@ class DashboardWindow(QWidget):
             logging.debug(f"Completed cleanup for subwindow: {key}")
         except Exception as e:
             logging.error(f"Error cleaning up subwindow for {key}: {str(e)}")
-        event.accept()
 
     def save_action(self):
         if self.current_project:
@@ -781,14 +819,6 @@ class DashboardWindow(QWidget):
         except Exception as e:
             logging.error(f"Error refreshing view: {str(e)}")
             QMessageBox.warning(self, "Error", f"Error refreshing view: {str(e)}")
-
-    def display_dashboard(self):
-        if not self.current_project:
-            self.display_select_project()
-            return
-        self.current_feature = None
-        self.is_saving = False
-        self.saving_state_changed.emit(False)
 
     def clear_content_layout(self):
         try:

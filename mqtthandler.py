@@ -11,7 +11,7 @@ from collections import defaultdict
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class MQTTHandler(QObject):
-    data_received = pyqtSignal(str, str, str, int, list, int, int)  # Added frame_index
+    data_received = pyqtSignal(str, str, str, int, list, int, int)  # feature_name, tag_name, model_name, channel_idx, values, sample_rate, frame_index
     connection_status = pyqtSignal(str)
 
     def __init__(self, db, project_name, broker="192.168.1.231", port=1883):
@@ -130,21 +130,26 @@ class MQTTHandler(QObject):
                         logging.error(f"Model {model_name} not found")
                         continue
                     expected_channels = len(model.get("channels", []))
-                    tacho_channels = 2
 
                     for payload, _ in payloads:
                         try:
                             values = None
                             sample_rate = 1000
                             frame_index = 0
+                            main_channels = 0
+                            tacho_channels_count = 0
+                            samples_per_channel = 0
                             try:
                                 payload_str = payload.decode('utf-8')
                                 data = json.loads(payload_str)
                                 values = data.get("values", [])
                                 sample_rate = data.get("sample_rate", 1000)
                                 frame_index = data.get("frame_index", 0)
-                                if not isinstance(values, list) or len(values) < channel_count:
-                                    logging.warning(f"Invalid JSON payload format or insufficient channels: {len(values)}/{channel_count}")
+                                main_channels = data.get("main_channels", channel_count)
+                                tacho_channels_count = data.get("tacho_channels", 2)
+                                samples_per_channel = len(values[0]) if values and len(values) > 0 else 0
+                                if not isinstance(values, list) or len(values) < main_channels:
+                                    logging.warning(f"Invalid JSON payload format or insufficient channels: {len(values)}/{main_channels}")
                                     continue
                             except (UnicodeDecodeError, json.JSONDecodeError):
                                 payload_length = len(payload)
@@ -164,15 +169,15 @@ class MQTTHandler(QObject):
                                     continue
 
                                 header = values[:100]
-                                frame_index = (header[1] << 16) | header[0]  # Combine high and low
-                                total_values = values[100:]
-                                main_channels = header[2]
-                                sample_rate = header[3]
-                                tacho_channels_count = header[6]
+                                frame_index = (header[1] << 16) | header[0]
+                                main_channels = header[2] if len(header) > 2 else channel_count
+                                sample_rate = header[3] if len(header) > 3 else 1000
+                                tacho_channels_count = header[6] if len(header) > 6 else 2
                                 total_channels = main_channels + tacho_channels_count
-                                samples_per_channel = (len(total_values) // total_channels) if total_values else 0
+                                total_values = values[100:]
+                                samples_per_channel = (len(total_values) // total_channels) if total_values and total_channels > 0 else 0
 
-                                if main_channels <= 0 or sample_rate <= 0 or tacho_channels_count <= 0 or samples_per_channel <= 0:
+                                if main_channels <= 0 or sample_rate <= 0 or tacho_channels_count < 0 or samples_per_channel <= 0:
                                     logging.error(f"Invalid header: main_channels={main_channels}, sample_rate={sample_rate}, "
                                                  f"tacho_channels_count={tacho_channels_count}, samples_per_channel={samples_per_channel}")
                                     continue
@@ -196,29 +201,33 @@ class MQTTHandler(QObject):
                                 if tacho_trigger_data:
                                     values.append([float(v) for v in tacho_trigger_data])
 
+                            if not values or len(values) == 0:
+                                logging.warning(f"No valid data extracted from payload for topic {topic}")
+                                continue
+
                             for feature_name, _ in self.feature_mapping.items():
                                 buffer_key = (tag_name, model_name, feature_name)
                                 if feature_name == "Multiple Trend View":
                                     if buffer_key not in self._channel_data_buffer:
-                                        self._channel_data_buffer[buffer_key] = [[] for _ in range(expected_channels + tacho_channels)]
+                                        self._channel_data_buffer[buffer_key] = [[] for _ in range(main_channels + tacho_channels_count)]
                                     for ch_idx in range(len(values)):
                                         self._channel_data_buffer[buffer_key][ch_idx].extend(values[ch_idx])
-                                    if all(len(ch_data) > 0 for ch_data in self._channel_data_buffer[buffer_key][:-tacho_channels]):
+                                    if all(len(ch_data) > 0 for ch_data in self._channel_data_buffer[buffer_key][:-tacho_channels_count]):
                                         aggregated_values = self._channel_data_buffer[buffer_key]
                                         self.data_received.emit(feature_name, tag_name, model_name, -1, aggregated_values, sample_rate, frame_index)
                                         logging.debug(f"Emitted aggregated data for {feature_name}/{tag_name}/{model_name}: {len(aggregated_values)} channels, frame {frame_index}")
-                                        self._channel_data_buffer[buffer_key] = [[] for _ in range(expected_channels + tacho_channels)]
+                                        self._channel_data_buffer[buffer_key] = [[] for _ in range(main_channels + tacho_channels_count)]
                                 else:
                                     if feature_name in ["Time View", "Time Report", "Tabular View"]:
                                         self.data_received.emit(feature_name, tag_name, model_name, -1, values, sample_rate, frame_index)
                                         logging.debug(f"Emitted for {feature_name}/{tag_name}/{model_name}/all_channels: {len(values)} channels, frame {frame_index}")
                                     elif feature_name in ["Orbit", "FFT"]:
-                                        for ch_idx in range(min(channel_count, len(values))):
+                                        for ch_idx in range(min(main_channels, len(values))):
                                             channel_values = values[ch_idx] if ch_idx < len(values) else []
                                             self.data_received.emit(feature_name, tag_name, model_name, ch_idx, channel_values, sample_rate, frame_index)
                                             logging.debug(f"Emitted for {feature_name}/{tag_name}/{model_name}/channel_{ch_idx}: {len(channel_values)} samples, frame {frame_index}")
                                     else:
-                                        for ch_idx in range(min(channel_count, len(values))):
+                                        for ch_idx in range(min(main_channels, len(values))):
                                             channel_values = values[ch_idx] if ch_idx < len(values) else []
                                             self.data_received.emit(feature_name, tag_name, model_name, ch_idx, channel_values, sample_rate, frame_index)
                                             logging.debug(f"Emitted for {feature_name}/{tag_name}/{model_name}/channel_{ch_idx}: {len(channel_values)} samples, frame {frame_index}")

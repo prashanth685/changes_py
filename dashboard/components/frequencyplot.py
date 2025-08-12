@@ -139,334 +139,127 @@ class FrequencyPlot(QWidget):
             QPushButton:pressed { background-color: #2c5d9b; }
         """)
         self.select_button.clicked.connect(self.select_button_click)
-        self.layout.addWidget(self.select_button)
+        self.slider_layout.addWidget(self.select_button)
 
-        self.layout.addStretch()
         self.setLayout(self.layout)
-        self.update_labels()
 
     def initialize_data(self):
         try:
-            self.current_records.clear()
-            self.filtered_records.clear()
-            self.fetch_all_records()
+            messages = self.db.get_history_messages(self.project_name, self.model_name, self.filename)
+            if not messages:
+                logging.error(f"No history messages found for {self.filename}")
+                return
+            self.current_records = messages
+            self.filtered_records = self.current_records.copy()
+            self.time_data = [mdates.date2num(self.parse_time(record.get("createdAt"))) for record in self.filtered_records if self.parse_time(record.get("createdAt"))]
+            self.frequency_data = [record.get("messageFrequency", 0) for record in self.filtered_records if "messageFrequency" in record]
+            self.filter_and_plot_data()
         except Exception as e:
             logging.error(f"Error initializing data: {str(e)}")
-            self.show_message_box("Error initializing view.", "Error", "error")
-
-    def fetch_all_records(self):
-        try:
-            messages = self.db.get_history_messages(
-                project_name=self.project_name,
-                model_name=self.model_name,
-                filename=self.filename
-            )
-            if not messages:
-                logging.info("No records found for selected recording.")
-                self.show_message_box("No records found for selected recording.", "Information", "info")
-                return
-
-            self.current_records = sorted(messages, key=lambda x: x.get("frameIndex", 0))
-            logging.info(f"Loaded {len(self.current_records)} records for {self.filename}")
-
-            if not self.start_time or not self.end_time:
-                created_times = [self.parse_time(r.get("createdAt", "")) for r in self.current_records if r.get("createdAt")]
-                self.start_time = min(created_times) if created_times else datetime.datetime.now()
-                self.end_time = max(created_times) if created_times else datetime.datetime.now()
-
-            recording_duration = (self.end_time - self.start_time).total_seconds() / 60
-            if recording_duration > 6:
-                logging.info("Recording > 6 minutes, plotting initial 5%")
-                self.lower_time_percentage = 0
-                self.upper_time_percentage = 5
-                self.start_slider.setValue(0)
-                self.end_slider.setValue(5)
-                self.update_labels()
-                self.filter_records_by_frame_index_range()
-                self.plot_frequency_data()
-            else:
-                self.filtered_records = self.current_records.copy()
-                self.plot_frequency_data()
-        except Exception as e:
-            logging.error(f"Error fetching records: {str(e)}")
-            self.show_message_box(f"Error fetching records: {str(e)}", "Error", "error")
-
-    def filter_records_by_frame_index_range(self):
-        try:
-            if not self.current_records:
-                self.filtered_records.clear()
-                return
-
-            min_frame_index = min(r.get("frameIndex", 0) for r in self.current_records)
-            max_frame_index = max(r.get("frameIndex", 0) for r in self.current_records)
-            total_frame_range = max_frame_index - min_frame_index
-
-            start_frame_index = min_frame_index + int(total_frame_range * self.lower_time_percentage / 100.0)
-            end_frame_index = min_frame_index + int(total_frame_range * self.upper_time_percentage / 100.0)
-
-            start_frame_index = max(min_frame_index, start_frame_index)
-            end_frame_index = min(max_frame_index, end_frame_index)
-
-            self.filtered_records = [
-                r for r in self.current_records
-                if start_frame_index <= r.get("frameIndex", 0) <= end_frame_index
-            ]
-            self.filtered_records.sort(key=lambda x: x.get("frameIndex", 0))
-            logging.info(f"Filtered {len(self.filtered_records)} records from {len(self.current_records)} for frame range {start_frame_index} to {end_frame_index}")
-        except Exception as e:
-            logging.error(f"Error filtering records: {str(e)}")
-            self.filtered_records.clear()
-
-    def save_crosshair_state(self):
-        try:
-            if self.is_crosshair_visible or self.is_crosshair_locked:
-                self.saved_crosshair_visible = self.is_crosshair_visible
-                self.saved_crosshair_locked = self.is_crosshair_locked
-                self.saved_crosshair_position = self.locked_crosshair_position
-                self.crosshair_state_saved = True
-            else:
-                self.crosshair_state_saved = False
-        except Exception as e:
-            logging.error(f"Error saving crosshair state: {str(e)}")
-
-    def restore_crosshair_state(self):
-        try:
-            if self.crosshair_state_saved:
-                self.is_crosshair_visible = self.saved_crosshair_visible
-                self.is_crosshair_locked = self.saved_crosshair_locked
-                self.locked_crosshair_position = self.saved_crosshair_position
-        except Exception as e:
-            logging.error(f"Error restoring crosshair state: {str(e)}")
-
-    def plot_frequency_data(self):
-        try:
-            self.ax.clear()
-            if not self.filtered_records:
-                self.canvas.draw()
-                return
-
-            sample_rate = self.filtered_records[0].get("samplingRate", 1)
-            num_channels = self.filtered_records[0].get("numberOfChannels", 1)
-            samples_per_channel = self.filtered_records[0].get("samplingSize", 1)
-            tacho_count = self.filtered_records[0].get("tacoChannelCount", 0)
-
-            if tacho_count < 1:
-                logging.info("No tacho channel data available for frequency plot")
-                return
-
-            tacho_index = num_channels
-            frame_indices = [r.get("frameIndex", 0) for r in self.filtered_records]
-            created_times = [self.parse_time(r.get("createdAt", "")) for r in self.filtered_records]
-            tacho_data = []
-            for r in self.filtered_records:
-                message = r.get("message", [])
-                start_idx = tacho_index * samples_per_channel
-                end_idx = start_idx + samples_per_channel
-                tacho_data.append(np.array(message[start_idx:end_idx]) / 100)
-
-            self.time_data = [mdates.date2num(t) for t in created_times]
-            self.frequency_data = [np.mean(data) for data in tacho_data]
-
-            self.ax.plot(self.time_data, self.frequency_data, 'b-', label='Tacho Frequency')
-            if self.is_crosshair_visible and not self.is_crosshair_locked:
-                self.v_line = self.ax.axvline(x=self.time_data[0], color='r', linestyle='--', visible=False)
-                self.h_line = self.ax.axhline(y=self.frequency_data[0], color='r', linestyle='--', visible=False)
-            if self.is_crosshair_locked and self.locked_crosshair_position:
-                x, y = self.locked_crosshair_position
-                self.ax.axvline(x=x, color='r', linestyle='--')
-                self.ax.axhline(y=y, color='r', linestyle='--')
-
-            self.ax.set_xlabel('Time')
-            self.ax.set_ylabel('Frequency (Hz)')
-            self.ax.set_title(f'Frequency Plot - {self.filename}')
-            self.ax.grid(True)
-            self.ax.legend()
-            self.ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M:%S'))
-            self.figure.autofmt_xdate()
-            self.canvas.draw()
-        except Exception as e:
-            logging.error(f"Error plotting frequency data: {str(e)}")
-            self.show_message_box(f"Error plotting data: {str(e)}", "Error", "error")
-
-    def on_mouse_move(self, event):
-        try:
-            if not event.inaxes or self.is_crosshair_locked or (datetime.datetime.now() - self.last_mouse_move).total_seconds() * 1000 < self.mouse_move_debounce_ms:
-                return
-
-            self.last_mouse_move = datetime.datetime.now()
-            x, y = event.xdata, event.ydata
-            if x is None or y is None:
-                return
-
-            if not self.is_crosshair_visible:
-                self.is_crosshair_visible = True
-                self.v_line = self.ax.axvline(x=x, color='r', linestyle='--')
-                self.h_line = self.ax.axhline(y=y, color='r', linestyle='--')
-            else:
-                self.v_line.set_xdata([x, x])
-                self.h_line.set_ydata([y, y])
-            self.canvas.draw()
-        except Exception as e:
-            logging.error(f"Error in mouse move: {str(e)}")
-
-    def on_mouse_click(self, event):
-        try:
-            if not event.inaxes:
-                return
-            x, y = event.xdata, event.ydata
-            if x is None or y is None:
-                return
-
-            if event.button == 1:  # Left click
-                self.is_crosshair_locked = not self.is_crosshair_locked
-                if self.is_crosshair_locked:
-                    self.locked_crosshair_position = (x, y)
-                    self.v_line.set_xdata([x, x])
-                    self.h_line.set_ydata([y, y])
-                else:
-                    self.locked_crosshair_position = None
-                    self.v_line.set_visible(False)
-                    self.h_line.set_visible(False)
-                self.canvas.draw()
-        except Exception as e:
-            logging.error(f"Error in mouse click: {str(e)}")
-
-    def on_mouse_leave(self, event):
-        try:
-            if self.is_crosshair_visible and not self.is_crosshair_locked:
-                self.is_crosshair_visible = False
-                self.v_line.set_visible(False)
-                self.h_line.set_visible(False)
-                self.canvas.draw()
-        except Exception as e:
-            logging.error(f"Error in mouse leave: {str(e)}")
-
-    def start_range_drag(self):
-        try:
-            self.is_dragging_range = True
-            self.initial_lower_x = self.lower_time_percentage
-            self.initial_upper_x = self.upper_time_percentage
-        except Exception as e:
-            logging.error(f"Error starting range drag: {str(e)}")
-
-    def stop_range_drag(self):
-        try:
-            self.is_dragging_range = False
-            self.debounce_timer.start(self.debounce_delay)
-        except Exception as e:
-            logging.error(f"Error stopping range drag: {str(e)}")
-
-    def range_mouse_move(self, event):
-        try:
-            if not self.is_dragging_range:
-                return
-
-            mouse_x = event.x()
-            widget_width = self.slider_widget.width()
-            if widget_width <= 0:
-                return
-
-            delta_x = (mouse_x - self.drag_start_x) / widget_width * 100
-            new_lower_x = max(0, min(100, self.initial_lower_x + delta_x))
-            new_upper_x = max(0, min(100, self.initial_upper_x + delta_x))
-
-            min_range = self.get_minimum_range_percentage()
-            if new_upper_x - new_lower_x < min_range:
-                return
-
-            self.start_slider.setValue(int(new_lower_x))
-            self.end_slider.setValue(int(new_upper_x))
-            self.lower_time_percentage = new_lower_x
-            self.upper_time_percentage = new_upper_x
-            self.update_labels()
-            self.debounce_timer.start(self.debounce_delay)
-        except Exception as e:
-            logging.error(f"Error in range mouse move: {str(e)}")
-
-    def get_minimum_range_percentage(self):
-        try:
-            if not self.start_time or not self.end_time:
-                return 1.0
-
-            total_duration_seconds = (self.end_time - self.start_time).total_seconds()
-            if total_duration_seconds <= 0:
-                return 1.0
-
-            min_duration_seconds = 1.0
-            if self.current_records:
-                sampling_rate = self.current_records[0].get("samplingRate", 1)
-                if sampling_rate > 0:
-                    min_duration_seconds = max(1.0 / sampling_rate, 0.1)
-
-            return min(min_duration_seconds / total_duration_seconds * 100, 100.0)
-        except Exception as e:
-            logging.error(f"Error calculating minimum range percentage: {str(e)}")
-            return 1.0
-
-    def update_labels(self):
-        try:
-            total_duration = (self.end_timestamp - self.start_timestamp)
-            start_value = self.start_slider.value() / 100.0
-            end_value = self.end_slider.value() / 100.0
-            start_ts = self.start_timestamp + (total_duration * start_value)
-            end_ts = self.start_timestamp + (total_duration * end_value)
-            start_time_str = datetime.datetime.fromtimestamp(start_ts).strftime('%d-%m-%Y %H:%M:%S')
-            end_time_str = datetime.datetime.fromtimestamp(end_ts).strftime('%d-%m-%Y %H:%M:%S')
-            self.start_label.setText(f"Start: {start_time_str}")
-            self.end_label.setText(f"End: {end_time_str}")
-            self.lower_time_percentage = self.start_slider.value()
-            self.upper_time_percentage = self.end_slider.value()
-            self.debounce_timer.start(self.debounce_delay)
-        except Exception as e:
-            logging.error(f"Error updating labels: {str(e)}")
 
     def filter_and_plot_data(self):
         try:
             if not self.current_records:
                 return
-            self.filter_records_by_frame_index_range()
-            self.plot_frequency_data()
+            lower_time = self.start_time + datetime.timedelta(seconds=(self.end_time - self.start_time).total_seconds() * (self.lower_time_percentage / 100))
+            upper_time = self.start_time + datetime.timedelta(seconds=(self.end_time - self.start_time).total_seconds() * (self.upper_time_percentage / 100))
+            self.filtered_records = [record for record in self.current_records if lower_time <= self.parse_time(record.get("createdAt")) <= upper_time]
+            self.time_data = [mdates.date2num(self.parse_time(record.get("createdAt"))) for record in self.filtered_records if self.parse_time(record.get("createdAt"))]
+            self.frequency_data = [record.get("messageFrequency", 0) for record in self.filtered_records if "messageFrequency" in record]
+            self.ax.clear()
+            self.ax.plot(self.time_data, self.frequency_data, marker='o', linestyle='-', color='b', label='Frequency')
+            self.ax.set_xlabel('Time')
+            self.ax.set_ylabel('Frequency')
+            self.ax.set_title('Frequency vs Time')
+            self.ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M:%S'))
+            self.ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+            self.figure.autofmt_xdate()
+            self.ax.legend()
+            self.canvas.draw()
+            logging.debug(f"Plotted {len(self.filtered_records)} data points")
         except Exception as e:
-            logging.error(f"Error in filter and plot: {str(e)}")
+            logging.error(f"Error filtering and plotting data: {str(e)}")
 
-    def downsample_array(self, array, factor):
-        if factor <= 1:
-            return array
-        output_length = int(np.ceil(len(array) / factor))
-        output = np.zeros(output_length)
-        for i in range(output_length):
-            start_index = i * factor
-            end_index = min(start_index + factor, len(array))
-            output[i] = np.mean(array[start_index:end_index])
-        return output
+    def update_labels(self):
+        self.lower_time_percentage = self.start_slider.value()
+        self.upper_time_percentage = self.end_slider.value()
+        lower_time = self.start_time + datetime.timedelta(seconds=(self.end_time - self.start_time).total_seconds() * (self.lower_time_percentage / 100))
+        upper_time = self.start_time + datetime.timedelta(seconds=(self.end_time - self.start_time).total_seconds() * (self.upper_time_percentage / 100))
+        self.start_label.setText(f"Start: {lower_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        self.end_label.setText(f"End: {upper_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        self.debounce_timer.start(self.debounce_delay)
 
-    def get_current_frame_index_range(self):
+    def on_mouse_move(self, event):
+        if not event.inaxes:
+            return
+        current_time = datetime.datetime.now()
+        if (current_time - self.last_mouse_move).total_seconds() * 1000 < self.mouse_move_debounce_ms:
+            return
+        self.last_mouse_move = current_time
+        if self.is_crosshair_visible and not self.is_crosshair_locked:
+            self.draw_crosshair(event.xdata, event.ydata)
+        if self.is_dragging_range:
+            self.update_range_on_drag(event.xdata)
+
+    def on_mouse_click(self, event):
+        if not event.inaxes:
+            return
+        if self.is_crosshair_visible and not self.is_crosshair_locked:
+            self.is_crosshair_locked = True
+            self.locked_crosshair_position = (event.xdata, event.ydata)
+            self.draw_crosshair(event.xdata, event.ydata)
+            logging.debug(f"Crosshair locked at ({event.xdata}, {event.ydata})")
+
+    def on_mouse_leave(self, event):
+        if self.is_crosshair_visible and not self.is_crosshair_locked:
+            self.remove_crosshair()
+
+    def draw_crosshair(self, x, y):
+        if hasattr(self, 'crosshair_vline'):
+            self.crosshair_vline.remove()
+        if hasattr(self, 'crosshair_hline'):
+            self.crosshair_hline.remove()
+        self.crosshair_vline = Line2D([x, x], [self.ax.get_ylim()[0], self.ax.get_ylim()[1]], color='red', linestyle='--')
+        self.crosshair_hline = Line2D([self.ax.get_xlim()[0], self.ax.get_xlim()[1]], [y, y], color='red', linestyle='--')
+        self.ax.add_line(self.crosshair_vline)
+        self.ax.add_line(self.crosshair_hline)
+        self.canvas.draw_idle()
+
+    def remove_crosshair(self):
+        if hasattr(self, 'crosshair_vline'):
+            self.crosshair_vline.remove()
+        if hasattr(self, 'crosshair_hline'):
+            self.crosshair_hline.remove()
+        self.canvas.draw_idle()
+
+    def start_range_drag(self):
+        self.is_dragging_range = True
+        self.drag_start_x = self.ax.get_xlim()[0] + (self.ax.get_xlim()[1] - self.ax.get_xlim()[0]) * (self.lower_time_percentage / 100)
+
+    def stop_range_drag(self):
+        self.is_dragging_range = False
+
+    def range_mouse_move(self, event):
+        if self.is_dragging_range:
+            self.update_range_on_drag(event.xdata)
+
+    def update_range_on_drag(self, x):
+        if not x:
+            return
+        delta_x = x - self.drag_start_x
+        delta_percentage = (delta_x / (self.ax.get_xlim()[1] - self.ax.get_xlim()[0])) * 100
+        new_lower = max(0, min(100, self.lower_time_percentage + delta_percentage))
+        new_upper = max(0, min(100, self.upper_time_percentage + delta_percentage))
+        if new_lower < new_upper:
+            self.lower_time_percentage = new_lower
+            self.upper_time_percentage = new_upper
+            self.start_slider.setValue(int(new_lower))
+            self.end_slider.setValue(int(new_upper))
+            self.filter_and_plot_data()
+
+    def find_closest_record(self, selected_time):
         try:
-            if not self.current_records:
-                return (0, 0)
-            min_frame_index = min(r.get("frameIndex", 0) for r in self.current_records)
-            max_frame_index = max(r.get("frameIndex", 0) for r in self.current_records)
-            total_frame_range = max_frame_index - min_frame_index
-            start_frame_index = min_frame_index + int(total_frame_range * self.lower_time_percentage / 100.0)
-            end_frame_index = min_frame_index + int(total_frame_range * self.upper_time_percentage / 100.0)
-            start_frame_index = max(min_frame_index, start_frame_index)
-            end_frame_index = min(max_frame_index, end_frame_index)
-            return (start_frame_index, end_frame_index)
-        except Exception as e:
-            logging.error(f"Error getting frame index range: {str(e)}")
-            return (0, 0)
-
-    def find_closest_record(self, clicked_time):
-        try:
-            clicked_time = dt.fromtimestamp(clicked_time)
-            closest_record = min(
-                self.current_records,
-                key=lambda r: abs((self.parse_time(r.get("createdAt", self.start_time)) - clicked_time).total_seconds()),
-                default=None
-            )
-            if not closest_record:
-                logging.info("No matching record found for clicked time")
-                return None
+            closest_record = min(self.filtered_records, key=lambda r: abs(self.parse_time(r.get("createdAt")).timestamp() - selected_time))
             if not closest_record.get("message"):
                 query = {
                     "filename": self.filename,

@@ -5,7 +5,6 @@ from PyQt5.QtGui import QIcon
 from pyqtgraph import PlotWidget, mkPen, AxisItem
 from datetime import datetime
 import time
-import re
 import logging
 
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -35,9 +34,6 @@ class TimeViewFeature:
         self.channel = channel
         self.model_name = model_name
         self.console = console
-        self.is_saving = False
-        self.filename_counter = 0
-        self.current_filename = None
         self.widget = None
         self.plot_widgets = []
         self.plots = []
@@ -316,51 +312,6 @@ class TimeViewFeature:
     def get_widget(self):
         return self.widget
 
-    def refresh_filenames(self):
-        try:
-            filenames = self.db.get_distinct_filenames(self.project_name, self.model_name)
-            logging.debug(f"Retrieved filenames from database: {filenames}")
-            if filenames:
-                numbers = []
-                for f in filenames:
-                    match = re.match(r"data(\d+)", f)
-                    if match:
-                        numbers.append(int(match.group(1)))
-                self.filename_counter = max(numbers, default=0) + 1 if numbers else 1
-            else:
-                self.filename_counter = 1
-            logging.info(f"Updated filename counter to: {self.filename_counter}")
-            if self.console:
-                self.console.append_to_console(f"Refreshed filenames: {len(filenames)} found, counter set to {self.filename_counter}")
-            return filenames
-        except Exception as e:
-            self.log_and_set_status(f"Error refreshing filenames: {str(e)}")
-            self.filename_counter = 1
-            return []
-
-    def start_saving(self):
-        if not self.parent.current_project or not self.model_name:
-            self.log_and_set_status("Cannot start saving: No project or model selected")
-            return
-        self.refresh_filenames()
-        self.current_filename = self.parent.sub_tool_bar.filename_edit.text() or f"data{self.filename_counter}"
-        self.is_saving = True
-        logging.info(f"Started saving data to filename: {self.current_filename}")
-        if self.console:
-            self.console.append_to_console(f"Started saving data to {self.current_filename}")
-
-    def stop_saving(self):
-        self.is_saving = False
-        self.current_filename = None
-        self.filename_counter += 1
-        logging.info(f"Stopped saving data, new filename counter: {self.filename_counter}")
-        if self.console:
-            self.console.append_to_console(f"Stopped saving data, next filename counter: {self.filename_counter}")
-        try:
-            self.parent.sub_tool_bar.refresh_filename()
-        except AttributeError:
-            logging.warning("No sub_tool_bar found to refresh filenames")
-
     def on_data_received(self, tag_name, model_name, values, sample_rate, frame_index):
         logging.debug(f"on_data_received called with tag_name={tag_name}, model_name={model_name}, "
                      f"values_len={len(values) if values else 0}, sample_rate={sample_rate}, frame_index={frame_index}")
@@ -373,15 +324,15 @@ class TimeViewFeature:
                 return
 
             expected_channels = len(values)
-            self.main_channels = expected_channels - 2 if expected_channels >= 2 else 0
-            self.tacho_channels_count = 2 if expected_channels >= 2 else 0
-            self.total_channels = self.main_channels + self.tacho_channels_count
+            if self.main_channels is None:
+                self.main_channels = self.parent.channel_count if hasattr(self.parent, 'channel_count') else expected_channels
+            self.tacho_channels_count = expected_channels - self.main_channels
+            if self.tacho_channels_count < 0:
+                self.log_and_set_status(f"Channel mismatch: received {expected_channels}, expected at least {self.main_channels}")
+                return
+            self.total_channels = expected_channels
             self.sample_rate = sample_rate
             self.samples_per_channel = len(values[0]) if values else 0
-
-            if not self.main_channels and expected_channels < self.tacho_channels_count:
-                self.log_and_set_status(f"Received incorrect number of sublists: {len(values) if values else 0}, expected at least {self.tacho_channels_count}")
-                return
 
             if not all(len(values[i]) == self.samples_per_channel for i in range(expected_channels)):
                 self.log_and_set_status(f"Channel data length mismatch: expected {self.samples_per_channel} samples")
@@ -395,8 +346,13 @@ class TimeViewFeature:
             time_step = 1.0 / sample_rate
             new_times = np.array([current_time - (self.samples_per_channel - 1 - i) * time_step for i in range(self.samples_per_channel)])
 
-            for ch in range(self.main_channels):
-                new_data = np.array(values[ch]) * self.scaling_factor
+            for ch in range(self.total_channels):
+                if ch < self.main_channels:
+                    new_data = np.array(values[ch]) * self.scaling_factor
+                elif ch == self.main_channels:
+                    new_data = np.array(values[ch]) / 100
+                else:
+                    new_data = np.array(values[ch])
                 if len(self.fifo_data[ch]) != self.fifo_window_samples:
                     self.fifo_data[ch] = np.zeros(self.fifo_window_samples)
                     self.fifo_times[ch] = np.array([current_time - (self.fifo_window_samples - 1 - j) * time_step for j in range(self.fifo_window_samples)])
@@ -406,69 +362,12 @@ class TimeViewFeature:
                 self.fifo_times[ch][-self.samples_per_channel:] = new_times
                 self.needs_refresh[ch] = True
 
-            if self.tacho_channels_count >= 1 and self.main_channels < len(values):
-                new_data = np.array(values[self.main_channels]) / 100
-                if len(self.fifo_data[self.main_channels]) != self.fifo_window_samples:
-                    self.fifo_data[self.main_channels] = np.zeros(self.fifo_window_samples)
-                    self.fifo_times[self.main_channels] = np.array([current_time - (self.fifo_window_samples - 1 - j) * time_step for j in range(self.fifo_window_samples)])
-                self.fifo_data[self.main_channels] = np.roll(self.fifo_data[self.main_channels], -self.samples_per_channel)
-                self.fifo_data[self.main_channels][-self.samples_per_channel:] = new_data
-                self.fifo_times[self.main_channels] = np.roll(self.fifo_times[self.main_channels], -self.samples_per_channel)
-                self.fifo_times[self.main_channels][-self.samples_per_channel:] = new_times
-                self.needs_refresh[self.main_channels] = True
-
-            if self.tacho_channels_count >= 2 and self.main_channels + 1 < len(values):
-                new_data = np.array(values[self.main_channels + 1])
-                if len(self.fifo_data[self.main_channels + 1]) != self.fifo_window_samples:
-                    self.fifo_data[self.main_channels + 1] = np.zeros(self.fifo_window_samples)
-                    self.fifo_times[self.main_channels + 1] = np.array([current_time - (self.fifo_window_samples - 1 - j) * time_step for j in range(self.fifo_window_samples)])
-                self.fifo_data[self.main_channels + 1] = np.roll(self.fifo_data[self.main_channels + 1], -self.samples_per_channel)
-                self.fifo_data[self.main_channels + 1][-self.samples_per_channel:] = new_data
-                self.fifo_times[self.main_channels + 1] = np.roll(self.fifo_times[self.main_channels + 1], -self.samples_per_channel)
-                self.fifo_times[self.main_channels + 1][-self.samples_per_channel:] = new_times
-                self.needs_refresh[self.main_channels + 1] = True
-
             for ch in range(self.total_channels):
                 if len(self.fifo_times[ch]) > 1:
                     sort_indices = np.argsort(self.fifo_times[ch])
                     self.fifo_times[ch] = self.fifo_times[ch][sort_indices]
                     self.fifo_data[ch] = self.fifo_data[ch][sort_indices]
                     self.needs_refresh[ch] = True
-
-            if self.is_saving:
-                try:
-                    flattened_message = []
-                    for ch in range(self.main_channels):
-                        flattened_message.extend(list(values[ch]))
-                    if self.tacho_channels_count >= 1:
-                        flattened_message.extend(list(values[self.main_channels]))
-                    if self.tacho_channels_count >= 2:
-                        flattened_message.extend(list(values[self.main_channels + 1]))
-
-                    message_data = {
-                        "topic": tag_name,
-                        "filename": self.current_filename,
-                        "frameIndex": frame_index,
-                        "message": flattened_message,
-                        "numberOfChannels": self.main_channels,
-                        "samplingRate": self.sample_rate,
-                        "samplingSize": self.samples_per_channel,
-                        "messageFrequency": None,
-                        "tacoChannelCount": self.tacho_channels_count,
-                        "createdAt": datetime.utcnow().isoformat(),
-                        "updatedAt": datetime.utcnow().isoformat()
-                    }
-                    success, msg = self.db.save_history_message(self.project_name, self.model_name, message_data)
-                    if success:
-                        logging.info(f"Saved data to database: {self.current_filename}, frame {frame_index}")
-                        if self.console:
-                            self.console.append_to_console(f"Saved data to {self.current_filename}, frame {frame_index}")
-                    else:
-                        logging.error(f"Failed to save history message: {msg}")
-                        self.log_and_set_status(f"Failed to save history message: {msg}")
-                except Exception as e:
-                    logging.error(f"Error saving history message: {str(e)}")
-                    self.log_and_set_status(f"Error saving history message: {str(e)}")
 
             self.refresh_plots()
         except Exception as e:
@@ -535,20 +434,15 @@ class TimeViewFeature:
             time_step = 1.0 / sample_rate
             new_times = np.array([current_time - (samples_per_channel - 1 - i) * time_step for i in range(samples_per_channel)])
 
-            for ch in range(self.main_channels):
-                self.fifo_data[ch] = np.array(values[ch]) * self.scaling_factor
+            for ch in range(self.total_channels):
+                if ch < self.main_channels:
+                    self.fifo_data[ch] = np.array(values[ch]) * self.scaling_factor
+                elif ch == self.main_channels:
+                    self.fifo_data[ch] = np.array(values[ch]) / 100
+                else:
+                    self.fifo_data[ch] = np.array(values[ch])
                 self.fifo_times[ch] = new_times
                 self.needs_refresh[ch] = True
-
-            if self.tacho_channels_count >= 1:
-                self.fifo_data[self.main_channels] = np.array(values[self.main_channels]) / 100
-                self.fifo_times[self.main_channels] = new_times
-                self.needs_refresh[self.main_channels] = True
-
-            if self.tacho_channels_count >= 2:
-                self.fifo_data[self.main_channels + 1] = np.array(values[self.main_channels + 1])
-                self.fifo_times[self.main_channels + 1] = new_times
-                self.needs_refresh[self.main_channels + 1] = True
 
             self.refresh_plots()
             if self.console:

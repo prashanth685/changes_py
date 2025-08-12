@@ -178,7 +178,7 @@ class Database:
                 "two_xp_visible": True,
                 "nx_amp_visible": True,
                 "nx_phase_visible": True,
-                "updated_at": datetime.datetime.utcnow()
+                "updated_at": datetime.datetime.now().isoformat()
             }
             self.tabularview_collection.insert_one(tabular_settings)
             logging.info(f"Initialized TabularViewSettings for project ID: {project_id} with unit: {unit}")
@@ -197,7 +197,7 @@ class Database:
                 "numberOfAverages": 10,
                 "weightingMode": "Linear",
                 "linearMode": "Continuous",
-                "updatedAt": datetime.datetime.utcnow()
+                "updatedAt": datetime.datetime.now().isoformat()
             }
             self.fftsettings_collection.insert_one(fft_settings)
             logging.info(f"Initialized FFTSettings for project ID: {project_id}")
@@ -309,7 +309,7 @@ class Database:
                     {"$set": {
                         "project_name": new_project_name,
                         "unit": unit,
-                        "updated_at": datetime.datetime.utcnow()
+                        "updated_at": datetime.datetime.now().isoformat()
                     }}
                 )
                 logging.info(f"Updated TabularViewSettings for project {new_project_name} with unit: {unit}")
@@ -319,7 +319,7 @@ class Database:
                 {"project_name": old_project_name, "email": self.email},
                 {"$set": {
                     "project_name": new_project_name,
-                    "updatedAt": datetime.datetime.utcnow()
+                    "updatedAt": datetime.datetime.now().isoformat()
                 }}
             )
             logging.info(f"Updated FFTSettings for project {new_project_name}")
@@ -329,7 +329,7 @@ class Database:
                 {"projectName": old_project_name, "email": self.email},
                 {"$set": {
                     "projectName": new_project_name,
-                    "updatedAt": datetime.datetime.utcnow().isoformat()
+                    "updatedAt": datetime.datetime.now().isoformat()
                 }}
             )
             logging.info(f"Updated history collection for project {new_project_name}")
@@ -549,8 +549,8 @@ class Database:
         message_data.setdefault("samplingSize", None)
         message_data.setdefault("messageFrequency", None)
         message_data.setdefault("tacoChannelCount", 0)
-        message_data.setdefault("createdAt", datetime.datetime.utcnow().isoformat())
-        message_data.setdefault("updatedAt", datetime.datetime.utcnow().isoformat())
+        message_data.setdefault("createdAt", datetime.datetime.now().isoformat())
+        message_data.setdefault("updatedAt", datetime.datetime.now().isoformat())
         message_data["projectName"] = project_name
         message_data["moduleName"] = model_name
         message_data["email"] = self.email

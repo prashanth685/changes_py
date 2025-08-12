@@ -1,4 +1,4 @@
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit, QPushButton, QLabel, QMessageBox, QScrollArea, QComboBox, QApplication, QTableWidget, QTableWidgetItem
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit, QPushButton, QLabel, QMessageBox, QScrollArea, QComboBox, QApplication, QTableWidget, QTableWidgetItem, QHeaderView
 from PyQt5.QtCore import Qt, pyqtSignal
 import sys
 import datetime
@@ -6,7 +6,7 @@ import logging
 
 app = QApplication(sys.argv)
 
-# 🌐 Global stylesheet for QMessageBox
+# 🌐 Global stylesheet for QMessageBox and QComboBox
 app.setStyleSheet("""
     QMessageBox {
         background-color: #fefefe;
@@ -37,6 +37,31 @@ app.setStyleSheet("""
     QMessageBox QPushButton:pressed {
         background-color: #1d4ed8;
     }
+
+    QComboBox {
+        border: 1px solid #d1d5db;
+        border-radius: 4px;
+        padding: 6px;
+        font-size: 13px;
+        background-color: #ffffff;
+        min-height: 28px;
+    }
+    QComboBox::drop-down {
+        border-left: 1px solid #d1d5db;
+        width: 20px;
+    }
+    QComboBox::down-arrow {
+        image: none;
+        width: 10px;
+        height: 10px;
+    }
+    QComboBox:hover {
+        border-color: #93c5fd;
+    }
+    QComboBox:focus {
+        border-color: #3b82f6;
+        outline: none;
+    }
 """)
 
 class CreateProjectWidget(QWidget):
@@ -54,6 +79,7 @@ class CreateProjectWidget(QWidget):
         self.available_types = ["Displacement", "Acc/Vel"]
         self.available_directions = ["Right", "Left"]
         self.available_channel_counts = ["DAQ4CH", "DAQ8CH", "DAQ10CH"]
+        self.available_units = ["mil", "mm", "um"]
         self.initUI()
         logging.debug(f"Initialized CreateProjectWidget in {'edit' if edit_mode else 'create'} mode for project: {existing_project_name}")
 
@@ -271,12 +297,14 @@ class CreateProjectWidget(QWidget):
                     border: 1px solid #e5e7eb;
                     border-radius: 8px;
                     background-color: #ffffff;
-                    padding: 10px;
+                    padding: 8px;
+                    font-size: 13px;
                 }
                 QTableWidget::item {
-                    padding: 15px;
+                    padding: 8px;
                     border-bottom: 1px solid #f1f5f9;
                     color: #2d3748;
+                    font-size: 13px;
                 }
                 QTableWidget::item:selected {
                     background-color: #edf2f7;
@@ -285,38 +313,53 @@ class CreateProjectWidget(QWidget):
                 QHeaderView::section {
                     background-color: #4a5568;
                     color: white;
-                    padding: 15px;
+                    padding: 8px;
                     font-weight: 600;
                     border: none;
                     border-bottom: 2px solid #2d3748;
-                    min-height: 40px;
-                }
-                QHeaderView::section:horizontal {
-                    text-align: left;
+                    font-size: 13px;
+                    min-height: 32px;
                 }
             """)
+            table.horizontalHeader().setVisible(True)
             table.horizontalHeader().setStretchLastSection(True)
-            table.horizontalHeader().setMinimumHeight(40)
+            table.horizontalHeader().setMinimumHeight(36)
             table.verticalHeader().setVisible(False)
             table.setAlternatingRowColors(True)
             table.setEditTriggers(QTableWidget.AllEditTriggers)
             table.setMinimumHeight(table.rowHeight(0) * num_channels + table.horizontalHeader().height() + 20)
             table.setMaximumHeight(table.rowHeight(0) * num_channels + table.horizontalHeader().height() + 20)
             table.resizeColumnsToContents()
+            table.setMinimumWidth(800)
 
             for row in range(num_channels):
                 item = QTableWidgetItem(str(row + 1))
                 item.setTextAlignment(Qt.AlignCenter)
                 table.setItem(row, 0, item)
                 table.setItem(row, 1, QTableWidgetItem(""))
-                table.setItem(row, 2, QTableWidgetItem("Displacement"))
+                
+                type_combo = QComboBox()
+                type_combo.addItems(self.available_types)
+                type_combo.setCurrentText("Displacement")
+                table.setCellWidget(row, 2, type_combo)
+                
                 table.setItem(row, 3, QTableWidgetItem(""))
-                table.setItem(row, 4, QTableWidgetItem(""))
+                
+                unit_combo = QComboBox()
+                unit_combo.addItems(self.available_units)
+                unit_combo.setCurrentText("mil")
+                table.setCellWidget(row, 4, unit_combo)
+                
                 table.setItem(row, 5, QTableWidgetItem(""))
                 table.setItem(row, 6, QTableWidgetItem(""))
                 table.setItem(row, 7, QTableWidgetItem(""))
                 table.setItem(row, 8, QTableWidgetItem(""))
-                table.setItem(row, 9, QTableWidgetItem("Right"))
+                
+                direction_combo = QComboBox()
+                direction_combo.addItems(self.available_directions)
+                direction_combo.setCurrentText("Right")
+                table.setCellWidget(row, 9, direction_combo)
+                
                 table.setItem(row, 10, QTableWidgetItem(""))
 
             model_layout.addWidget(table)
@@ -436,41 +479,44 @@ class CreateProjectWidget(QWidget):
         table.setHorizontalHeaderLabels(["S.No.", "Channel Name", "Channel Type", "Sensitivity", "Unit", "Correction Factor", "Gain", "Unit Type", "Angle", "Direction", "Shaft"])
         table.setStyleSheet("""
             QTableWidget {
-                border: 1px solid #e5e7eb;
-                border-radius: 8px;
                 background-color: #ffffff;
-                padding: 10px;
+                border: 1px solid #e5e7eb;
+                border-radius: 6px;
+                font-size: 13px;
+                gridline-color: #e5e7eb;
+                selection-background-color: #edf2f7;
+                selection-color: #1a202c;
+                alternate-background-color: #f9fafb;
             }
             QTableWidget::item {
-                padding: 10px 10px;
-                border-bottom: 1px solid #f1f5f9;
-                color: #2d3748;
-            }
-            QTableWidget::item:selected {
-                background-color: #edf2f7;
-                color: #2d3748;
+                padding: 6px;
+                border: none;
+                height:70px;
+                color: #1a202c;
             }
             QHeaderView::section {
                 background-color: #4a5568;
                 color: white;
-                padding: 15px;
+                height:70px;
                 font-weight: 600;
+                font-size: 13px;
                 border: none;
-                border-bottom: 2px solid #2d3748;
-                min-height: 60px;
-            }
-            QHeaderView::section:horizontal {
-                text-align: left;
+                border-bottom: 1px solid #e5e7eb;
             }
         """)
+        table.horizontalHeader().setVisible(True)
         table.horizontalHeader().setStretchLastSection(True)
-        table.horizontalHeader().setMinimumHeight(60)
+        table.horizontalHeader().setMinimumHeight(45)
         table.verticalHeader().setVisible(False)
         table.setAlternatingRowColors(True)
         table.setEditTriggers(QTableWidget.AllEditTriggers)
+        table.setSelectionBehavior(QTableWidget.SelectRows)
+        table.setSelectionMode(QTableWidget.SingleSelection)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         table.setMinimumHeight(table.rowHeight(0) * num_channels + table.horizontalHeader().height() + 20)
         table.setMaximumHeight(table.rowHeight(0) * num_channels + table.horizontalHeader().height() + 20)
         table.resizeColumnsToContents()
+        table.setMinimumWidth(800)
 
         if existing_model and existing_model.get("channels"):
             for row, channel in enumerate(existing_model["channels"]):
@@ -480,14 +526,29 @@ class CreateProjectWidget(QWidget):
                 item.setTextAlignment(Qt.AlignCenter)
                 table.setItem(row, 0, item)
                 table.setItem(row, 1, QTableWidgetItem(channel.get("channelName", "")))
-                table.setItem(row, 2, QTableWidgetItem(channel.get("type", "Displacement")))
+                
+                type_combo = QComboBox()
+                type_combo.addItems(self.available_types)
+                type_combo.setCurrentText(channel.get("type", "Displacement"))
+                table.setCellWidget(row, 2, type_combo)
+                
                 table.setItem(row, 3, QTableWidgetItem(channel.get("sensitivity", "")))
-                table.setItem(row, 4, QTableWidgetItem(channel.get("unit", "")))
+                
+                unit_combo = QComboBox()
+                unit_combo.addItems(self.available_units)
+                unit_combo.setCurrentText(channel.get("unit", "mil"))
+                table.setCellWidget(row, 4, unit_combo)
+                
                 table.setItem(row, 5, QTableWidgetItem(channel.get("correctionValue", "")))
                 table.setItem(row, 6, QTableWidgetItem(channel.get("gain", "")))
                 table.setItem(row, 7, QTableWidgetItem(channel.get("unitType", "")))
                 table.setItem(row, 8, QTableWidgetItem(channel.get("angle", "")))
-                table.setItem(row, 9, QTableWidgetItem(channel.get("angleDirection", "Right")))
+                
+                direction_combo = QComboBox()
+                direction_combo.addItems(self.available_directions)
+                direction_combo.setCurrentText(channel.get("angleDirection", "Right"))
+                table.setCellWidget(row, 9, direction_combo)
+                
                 table.setItem(row, 10, QTableWidgetItem(channel.get("shaft", "")))
         else:
             for row in range(num_channels):
@@ -495,14 +556,29 @@ class CreateProjectWidget(QWidget):
                 item.setTextAlignment(Qt.AlignCenter)
                 table.setItem(row, 0, item)
                 table.setItem(row, 1, QTableWidgetItem(""))
-                table.setItem(row, 2, QTableWidgetItem("Displacement"))
+                
+                type_combo = QComboBox()
+                type_combo.addItems(self.available_types)
+                type_combo.setCurrentText("Displacement")
+                table.setCellWidget(row, 2, type_combo)
+                
                 table.setItem(row, 3, QTableWidgetItem(""))
-                table.setItem(row, 4, QTableWidgetItem(""))
+                
+                unit_combo = QComboBox()
+                unit_combo.addItems(self.available_units)
+                unit_combo.setCurrentText("mil")
+                table.setCellWidget(row, 4, unit_combo)
+                
                 table.setItem(row, 5, QTableWidgetItem(""))
                 table.setItem(row, 6, QTableWidgetItem(""))
                 table.setItem(row, 7, QTableWidgetItem(""))
                 table.setItem(row, 8, QTableWidgetItem(""))
-                table.setItem(row, 9, QTableWidgetItem("Right"))
+                
+                direction_combo = QComboBox()
+                direction_combo.addItems(self.available_directions)
+                direction_combo.setCurrentText("Right")
+                table.setCellWidget(row, 9, direction_combo)
+                
                 table.setItem(row, 10, QTableWidgetItem(""))
 
         model_layout.addWidget(table)
@@ -517,14 +593,29 @@ class CreateProjectWidget(QWidget):
         item.setTextAlignment(Qt.AlignCenter)
         table.setItem(current_rows, 0, item)
         table.setItem(current_rows, 1, QTableWidgetItem(""))
-        table.setItem(current_rows, 2, QTableWidgetItem("Displacement"))
+        
+        type_combo = QComboBox()
+        type_combo.addItems(self.available_types)
+        type_combo.setCurrentText("Displacement")
+        table.setCellWidget(current_rows, 2, type_combo)
+        
         table.setItem(current_rows, 3, QTableWidgetItem(""))
-        table.setItem(current_rows, 4, QTableWidgetItem(""))
+        
+        unit_combo = QComboBox()
+        unit_combo.addItems(self.available_units)
+        unit_combo.setCurrentText("mil")
+        table.setCellWidget(current_rows, 4, unit_combo)
+        
         table.setItem(current_rows, 5, QTableWidgetItem(""))
         table.setItem(current_rows, 6, QTableWidgetItem(""))
         table.setItem(current_rows, 7, QTableWidgetItem(""))
         table.setItem(current_rows, 8, QTableWidgetItem(""))
-        table.setItem(current_rows, 9, QTableWidgetItem("Right"))
+        
+        direction_combo = QComboBox()
+        direction_combo.addItems(self.available_directions)
+        direction_combo.setCurrentText("Right")
+        table.setCellWidget(current_rows, 9, direction_combo)
+        
         table.setItem(current_rows, 10, QTableWidgetItem(""))
         table.setMinimumHeight(table.rowHeight(0) * (current_rows + 1) + table.horizontalHeader().height() + 20)
         table.setMaximumHeight(table.rowHeight(0) * (current_rows + 1) + table.horizontalHeader().height() + 20)
@@ -569,14 +660,14 @@ class CreateProjectWidget(QWidget):
                         return
                     channels.append({
                         "channelName": channel_name,
-                        "type": table.item(row, 2).text().strip() if table.item(row, 2) else "Displacement",
+                        "type": table.cellWidget(row, 2).currentText() if table.cellWidget(row, 2) else "Displacement",
                         "sensitivity": table.item(row, 3).text().strip() if table.item(row, 3) else "",
-                        "unit": table.item(row, 4).text().strip() if table.item(row, 4) else "",
+                        "unit": table.cellWidget(row, 4).currentText() if table.cellWidget(row, 4) else "mil",
                         "correctionValue": table.item(row, 5).text().strip() if table.item(row, 5) else "",
                         "gain": table.item(row, 6).text().strip() if table.item(row, 6) else "",
                         "unitType": table.item(row, 7).text().strip() if table.item(row, 7) else "",
                         "angle": table.item(row, 8).text().strip() if table.item(row, 8) else "",
-                        "angleDirection": table.item(row, 9).text().strip() if table.item(row, 9) else "Right",
+                        "angleDirection": table.cellWidget(row, 9).currentText() if table.cellWidget(row, 9) else "Right",
                         "shaft": table.item(row, 10).text().strip() if table.item(row, 10) else ""
                     })
 
