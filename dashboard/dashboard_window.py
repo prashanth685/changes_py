@@ -244,12 +244,24 @@ class DashboardWindow(QWidget):
         self.main_section.set_widget(self.select_project_widget)
         logging.debug("Displayed SelectProjectWidget in MainSection")
 
+    def open_project(self):
+        self.display_select_project()
+        logging.debug("Opened project selection via SelectProjectWidget")
+
     def display_create_project(self):
         self.clear_content_layout()
         self.sub_tool_bar.setVisible(False)
         self.create_project_widget = CreateProjectWidget(self)
         self.main_section.set_widget(self.create_project_widget)
         logging.debug("Displayed CreateProjectWidget in MainSection")
+
+    def edit_project_dialog(self):
+        self.display_project_structure()
+        logging.debug("Displayed project structure for editing")
+
+    def create_project(self):
+        self.display_create_project()
+        logging.debug("Triggered create project action")
 
     def display_project_structure(self):
         self.clear_content_layout()
@@ -319,6 +331,7 @@ class DashboardWindow(QWidget):
                 self.mqtt_handler = MQTTHandler(self.db, self.current_project)
                 self.mqtt_handler.data_received.connect(self.on_data_received)
                 self.mqtt_handler.connection_status.connect(self.on_mqtt_status)
+                self.mqtt_handler.save_status.connect(self.console.append_to_console)
                 self.mqtt_handler.start()
                 logging.info(f"MQTT setup initiated for project: {self.current_project}")
                 self.console.append_to_console(f"MQTT setup initiated for project: {self.current_project}")
@@ -338,6 +351,7 @@ class DashboardWindow(QWidget):
             try:
                 self.mqtt_handler.data_received.disconnect()
                 self.mqtt_handler.connection_status.disconnect()
+                self.mqtt_handler.save_status.disconnect()
                 self.mqtt_handler.stop()
                 self.mqtt_handler.deleteLater()
                 logging.info("Previous MQTT handler stopped")
@@ -370,41 +384,7 @@ class DashboardWindow(QWidget):
 
     def on_data_received(self, feature_name, tag_name, model_name, channel_index, values, sample_rate, frame_index):
         try:
-            if model_name in self.saving_filenames:
-                filename = self.saving_filenames[model_name]
-                main_channels = len(values) - 2 if len(values) >= 2 else 0
-                tacho_count = 2 if len(values) >= 2 else 0
-                samples_per_channel = len(values[0]) if values else 0
-                flattened_message = []
-                for ch in range(main_channels):
-                    flattened_message.extend(list(values[ch]))
-                if tacho_count >= 1:
-                    flattened_message.extend(list(values[main_channels]))
-                if tacho_count >= 2:
-                    flattened_message.extend(list(values[main_channels + 1]))
-
-                message_data = {
-                    "topic": tag_name,
-                    "filename": filename,
-                    "frameIndex": frame_index,
-                    "message": flattened_message,
-                    "numberOfChannels": main_channels,
-                    "samplingRate": sample_rate,
-                    "samplingSize": samples_per_channel,
-                    "messageFrequency": None,
-                    "tacoChannelCount": tacho_count,
-                    "createdAt": datetime.datetime.now().isoformat(),
-                    "updatedAt": datetime.datetime.now().isoformat()
-                }
-                success, msg = self.db.save_history_message(self.current_project, model_name, message_data)
-                if success:
-                    logging.info(f"Saved data to database: {filename}, frame {frame_index}")
-                    if self.console:
-                        self.console.append_to_console(f"Saved data to {filename}, frame {frame_index}")
-                else:
-                    logging.error(f"Failed to save history message: {msg}")
-                    self.console.append_to_console(f"Failed to save history message: {msg}")
-
+            # Update feature instances that match the received data
             for key, feature_instance in self.feature_instances.items():
                 instance_feature, instance_model, instance_channel, _ = key
                 if (instance_feature == feature_name and instance_model == model_name and
@@ -438,94 +418,32 @@ class DashboardWindow(QWidget):
                 self.db.reconnect()
             self.tree_view.tree.clear()
             self.tree_view.add_project_to_tree(self.current_project)
+            project_data = self.db.get_project_data(self.current_project)
+            if not project_data or "models" not in project_data:
+                logging.warning(f"No models found for project: {self.current_project}")
+                self.console.append_to_console(f"No models found for project: {self.current_project}")
+                return
+            for model in project_data["models"]:
+                model_name = model.get("name")
+                if model_name:
+                    self.tree_view.add_model_to_tree(self.current_project, model_name)
+                    for channel_idx in range(1, self.channel_count + 1):
+                        self.tree_view.add_channel_to_model(self.current_project, model_name, f"Channel_{channel_idx}")
             for i in range(self.tree_view.tree.topLevelItemCount()):
                 item = self.tree_view.tree.topLevelItem(i)
                 if item.text(0) == f"📁 {self.current_project}":
                     item.setExpanded(True)
                     self.tree_view.tree.setCurrentItem(item)
-                    self.tree_view.tree.scrollToItem(item)
-                    break
-            logging.debug(f"Loaded project features for: {self.current_project}")
+            logging.debug(f"Loaded project features for {self.current_project} with {self.channel_count} channels")
+            self.console.append_to_console(f"Populated tree view for project: {self.current_project}")
         except Exception as e:
-            logging.error(f"Failed to load project features: {str(e)}")
-            QMessageBox.warning(self, "Error", f"Failed to load project features: {str(e)}")
-
-    def open_project(self):
-        try:
-            if not self.db.is_connected():
-                self.db.reconnect()
-            projects = self.db.load_projects()
-            if not projects:
-                QMessageBox.warning(self, "Error", "No projects available to open!")
-                return
-            self.display_project_structure()
-        except Exception as e:
-            logging.error(f"Error opening project: {str(e)}")
-            QMessageBox.warning(self, "Error", f"Error opening project: {str(e)}")
-
-    def create_project(self):
-        self.display_create_project()
-
-    def edit_project_dialog(self):
-        if not self.current_project:
-            QMessageBox.warning(self, "Error", "No project selected to edit!")
-            return
-        project_data = self.db.get_project_data(self.current_project)
-        if not project_data:
-            QMessageBox.warning(self, "Error", "Project data not found!")
-            return
-        self.clear_content_layout()
-        self.tree_view.setVisible(False)
-        self.sub_tool_bar.setVisible(False)
-        self.create_project_widget = CreateProjectWidget(
-            parent=self,
-            edit_mode=True,
-            existing_project_name=self.current_project,
-            existing_models=project_data.get("models", []),
-            existing_channel_count=project_data.get("channel_count", "DAQ4CH")
-        )
-        self.create_project_widget.project_edited.connect(self.handle_project_edited)
-        self.main_section.set_widget(self.create_project_widget)
-        logging.debug(f"Opened CreateProjectWidget in edit mode for {self.current_project}")
-
-    def handle_project_edited(self, new_project_name, updated_models, channel_count):
-        try:
-            if not self.db.is_connected():
-                self.db.reconnect()
-            valid_channel_counts = {
-                "DAQ4CH": 4,
-                "DAQ8CH": 8,
-                "DAQ10CH": 10
-            }
-            required_channels = valid_channel_counts.get(channel_count, 4)
-            project_data = {
-                "name": new_project_name,
-                "channel_count": channel_count,
-                "models": updated_models
-            }
-            success, message = self.db.update_project(self.current_project, project_data)
-            if success:
-                self.current_project = new_project_name
-                self.channel_count = required_channels
-                self.setWindowTitle(f'Sarayu Desktop Application - {self.current_project.upper()}')
-                self.load_project_features()
-                self.file_bar.update_state(project_name=new_project_name)
-                self.project_changed.emit(new_project_name)
-                self.console.append_to_console(f"Project {new_project_name} updated successfully.")
-                logging.info(f"Project {new_project_name} updated successfully")
-                self.display_dashboard()
-            else:
-                self.console.append_to_console(f"Error updating project: {message}")
-                logging.error(f"Error updating project: {message}")
-                QMessageBox.warning(self, "Error", f"Error updating project: {message}")
-        except Exception as e:
-            logging.error(f"Error handling project edit: {str(e)}")
-            QMessageBox.warning(self, "Error", f"Error updating project: {str(e)}")
+            logging.error(f"Error loading project features: {str(e)}")
+            self.console.append_to_console(f"Error loading project features: {str(e)}")
 
     def get_next_filename(self, model_name):
         try:
             filenames = self.db.get_distinct_filenames(self.current_project, model_name)
-            logging.debug(f"Retrieved filenames from database: {filenames}")
+            logging.debug(f"Retrieved filenames for {self.current_project}/{model_name}: {filenames}")
             if filenames:
                 numbers = [int(re.match(r"data(\d+)", f).group(1)) for f in filenames if re.match(r"data(\d+)", f)]
                 return f"data{max(numbers, default=0) + 1}"
@@ -547,38 +465,11 @@ class DashboardWindow(QWidget):
         if selected_model in self.saving_filenames:
             QMessageBox.warning(self, "Error", f"Already saving data for model {selected_model}!")
             return
-        time_view_keys = [k for k in self.feature_instances.keys() if k[0] == "Time View" and k[1] == selected_model]
-        if not time_view_keys:
-            unique_id = int(time.time() * 1000)
-            key = ("Time View", selected_model, None, unique_id)
-            feature_instance = TimeViewFeature(
-                self, self.db, self.current_project, model_name=selected_model, console=self.console
-            )
-            self.feature_instances[key] = feature_instance
-            widget = feature_instance.get_widget()
-            if widget:
-                sub_window = self.main_section.add_subwindow(
-                    widget,
-                    "Time View",
-                    model_name=selected_model
-                )
-                if sub_window:
-                    self.sub_windows[key] = sub_window
-                    sub_window.closeEvent = lambda event, k=key: self.on_subwindow_closed(event, k)
-                    sub_window.show()
-                    self.main_section.arrange_layout()
-                    logging.debug(f"Created new Time View subwindow for saving data, key: {key}")
-                else:
-                    logging.error(f"Failed to create subwindow for Time View/{selected_model}")
-                    del self.feature_instances[key]
-                    return
-            else:
-                logging.error(f"Time View returned invalid widget")
-                del self.feature_instances[key]
-                return
         filename = self.sub_tool_bar.filename_edit.text()
         if not filename:
             filename = self.get_next_filename(selected_model)
+        if self.mqtt_handler:
+            self.mqtt_handler.start_saving(selected_model, filename)
         self.saving_filenames[selected_model] = filename
         self.is_saving = bool(self.saving_filenames)
         self.saving_state_changed.emit(self.is_saving)
@@ -594,6 +485,8 @@ class DashboardWindow(QWidget):
         if selected_model not in self.saving_filenames:
             QMessageBox.warning(self, "Error", f"Not saving data for model {selected_model}!")
             return
+        if self.mqtt_handler:
+            self.mqtt_handler.stop_saving(selected_model)
         del self.saving_filenames[selected_model]
         self.is_saving = bool(self.saving_filenames)
         self.saving_state_changed.emit(self.is_saving)
@@ -610,8 +503,8 @@ class DashboardWindow(QWidget):
                 logging.warning(f"No project selected for {feature_name}")
                 return
             self.current_feature = feature_name
-            self.is_saving = False
-            self.saving_state_changed.emit(False)
+            self.is_saving = bool(self.saving_filenames)
+            self.saving_state_changed.emit(self.is_saving)
             self.sub_tool_bar.setVisible(True)
             current_console_height = self.console.console_message_area.height()
             selected_model = self.tree_view.get_selected_model()
@@ -780,8 +673,8 @@ class DashboardWindow(QWidget):
             if self.current_feature == feature_name:
                 if not any(k[0] == feature_name for k in self.feature_instances.keys()):
                     self.current_feature = None
-                    self.is_saving = False
-                    self.saving_state_changed.emit(False)
+                    self.is_saving = bool(self.saving_filenames)
+                    self.saving_state_changed.emit(self.is_saving)
                     logging.debug(f"Reset current_feature as no instances of {feature_name} remain")
             self.main_section.mdi_area.update()
             self.main_section.scroll_area.viewport().update()

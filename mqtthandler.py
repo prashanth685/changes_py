@@ -13,6 +13,7 @@ logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %
 class MQTTHandler(QObject):
     data_received = pyqtSignal(str, str, str, int, list, int, int)  # feature_name, tag_name, model_name, channel_idx, values, sample_rate, frame_index
     connection_status = pyqtSignal(str)
+    save_status = pyqtSignal(str)
 
     def __init__(self, db, project_name, broker="192.168.1.231", port=1883):
         super().__init__()
@@ -29,6 +30,7 @@ class MQTTHandler(QObject):
         self.running = False
         self.channel_counts = {}
         self._channel_data_buffer = defaultdict(lambda: defaultdict(list))
+        self.saving_filenames = {}
         self.feature_mapping = {
             "Tabular View": ["TabularView"],
             "Time View": ["TimeWave", "TimeReport"],
@@ -45,6 +47,13 @@ class MQTTHandler(QObject):
             "Report": ["Report"]
         }
         logging.debug(f"Initializing MQTTHandler with project_name: {project_name}, broker: {broker}")
+
+    def start_saving(self, model_name, filename):
+        self.saving_filenames[model_name] = filename
+
+    def stop_saving(self, model_name):
+        if model_name in self.saving_filenames:
+            del self.saving_filenames[model_name]
 
     def parse_topic(self, topic):
         try:
@@ -204,6 +213,39 @@ class MQTTHandler(QObject):
                             if not values or len(values) == 0:
                                 logging.warning(f"No valid data extracted from payload for topic {topic}")
                                 continue
+
+                            tacho_count = tacho_channels_count
+
+                            if model_name in self.saving_filenames:
+                                filename = self.saving_filenames[model_name]
+                                flattened_message = []
+                                for ch in range(main_channels):
+                                    flattened_message.extend(values[ch])
+                                if tacho_count >= 1:
+                                    flattened_message.extend(values[main_channels])
+                                if tacho_count >= 2:
+                                    flattened_message.extend(values[main_channels + 1])
+
+                                message_data = {
+                                    "topic": tag_name,
+                                    "filename": filename,
+                                    "frameIndex": frame_index,
+                                    "message": flattened_message,
+                                    "numberOfChannels": main_channels,
+                                    "samplingRate": sample_rate,
+                                    "samplingSize": samples_per_channel,
+                                    "messageFrequency": None,
+                                    "tacoChannelCount": tacho_count,
+                                    "createdAt": datetime.now().isoformat(),
+                                    "updatedAt": datetime.now().isoformat()
+                                }
+                                success, msg = self.db.save_history_message(self.project_name, model_name, message_data)
+                                if success:
+                                    logging.info(f"Saved data to database: {filename}, frame {frame_index}")
+                                    self.save_status.emit(f"Saved data to {filename}, frame {frame_index}")
+                                else:
+                                    logging.error(f"Failed to save history message: {msg}")
+                                    self.save_status.emit(f"Failed to save history message: {msg}")
 
                             for feature_name, _ in self.feature_mapping.items():
                                 buffer_key = (tag_name, model_name, feature_name)

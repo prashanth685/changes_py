@@ -2,8 +2,8 @@ import numpy as np
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QScrollArea, QPushButton, QComboBox, QGridLayout
 from PyQt5.QtCore import QObject, QEvent, Qt, QTimer
 from PyQt5.QtGui import QIcon
-from pyqtgraph import PlotWidget, mkPen, AxisItem
-from datetime import datetime
+from pyqtgraph import PlotWidget, mkPen, AxisItem, SignalProxy, InfiniteLine
+from datetime import datetime, timedelta
 import time
 import logging
 
@@ -23,6 +23,10 @@ class MouseTracker(QObject):
         self.feature = feature
 
     def eventFilter(self, obj, event):
+        if event.type() == QEvent.Enter:
+            self.feature.mouse_enter(self.idx)
+        elif event.type() == QEvent.Leave:
+            self.feature.mouse_leave(self.idx)
         return False
 
 class TimeViewFeature:
@@ -39,25 +43,43 @@ class TimeViewFeature:
         self.plots = []
         self.fifo_data = []
         self.fifo_times = []
+        self.vlines = []
+        self.proxies = []
+        self.trackers = []
         self.sample_rate = None
         self.main_channels = None
-        self.tacho_channels_count = None
+        self.tacho_channels_count = 2  # Default as per C# logic
         self.total_channels = None
         self.scaling_factor = 3.3 / 65535
         self.num_plots = None
         self.samples_per_channel = None
         self.window_seconds = 1
+        self.previous_window_seconds = 1
         self.fifo_window_samples = None
         self.settings_panel = None
         self.settings_button = None
         self.refresh_timer = None
         self.needs_refresh = []
         self.is_initialized = False
+        self.channel_properties = {}
+        self.channel_names = []
+        self.is_scrolling = False
+        self.active_line_idx = None
+        self.plot_colors = [
+            '#0000FF', '#FF0000', '#00FF00', '#800080', '#FFA500', '#A52A2A', '#FFC0CB', '#008080',
+            '#FF4500', '#32CD32', '#00CED1', '#FFD700', '#FF69B4', '#8A2BE2', '#FF6347', '#20B2AA',
+            '#ADFF2F', '#9932CC', '#FF7F50', '#00FA9A', '#9400D3'
+        ]
         self.initUI()
+        self.load_channel_properties()
 
     def initUI(self):
         self.widget = QWidget()
         main_layout = QVBoxLayout()
+
+        header = QLabel(f"TIME VIEW FOR {self.project_name.upper()}")
+        header.setStyleSheet("color: black; font-size: 26px; font-weight: bold; padding: 8px;")
+        main_layout.addWidget(header, alignment=Qt.AlignCenter)
 
         top_layout = QHBoxLayout()
         top_layout.addStretch()
@@ -162,97 +184,158 @@ class TimeViewFeature:
 
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setStyleSheet("""
+            QScrollArea {
+                border-radius: 8px;
+                padding: 5px;
+            }
+            QScrollBar:vertical {
+                background: white;
+                width: 10px;
+                margin: 0px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical {
+                background: black;
+                border-radius: 5px;
+            }
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+            QScrollBar::add-page:vertical,
+            QScrollBar::sub-page:vertical {
+                background: none;
+            }
+        """)
         self.scroll_content = QWidget()
         self.scroll_layout = QVBoxLayout(self.scroll_content)
+        self.scroll_content.setStyleSheet("background-color: #d1d6d9; border-radius: 5px; padding: 10px;")
         self.scroll_area.setWidget(self.scroll_content)
         main_layout.addWidget(self.scroll_area)
         self.widget.setLayout(main_layout)
 
         self.refresh_timer = QTimer()
         self.refresh_timer.timeout.connect(self.refresh_plots)
+        self.refresh_timer.start(100)  # Match C# refresh rate
+
+        self.scroll_debounce_timer = QTimer()
+        self.scroll_debounce_timer.setInterval(200)
+        self.scroll_debounce_timer.timeout.connect(self.stop_scrolling)
+        self.scroll_area.verticalScrollBar().valueChanged.connect(self.on_scroll_changed)
 
         if not self.model_name and self.console:
             self.console.append_to_console("No model selected in TimeViewFeature.")
         if not self.channel and self.console:
             self.console.append_to_console("No channel selected in TimeViewFeature.")
-        logging.debug("UI initialized, waiting for data to start refresh timer")
+        logging.debug("UI initialized, waiting for data to start plotting")
 
-    def initialize_plots(self):
-        if not self.main_channels or not self.tacho_channels_count or not self.total_channels:
-            logging.error("Cannot initialize plots: channel counts not set")
-            self.log_and_set_status("Cannot initialize plots: channel counts not set")
+    def load_channel_properties(self):
+        try:
+            project_data = self.db.get_project_data(self.project_name)
+            if not project_data:
+                self.log_and_set_status(f"Project {self.project_name} not found")
+                return
+            for model in project_data.get("models", []):
+                if model.get("name") == self.model_name:
+                    self.channel_names = [ch.get("channelName") for ch in model.get("channels", [])]
+                    for channel in model.get("channels", []):
+                        channel_name = channel.get("channelName")
+                        self.channel_properties[channel_name] = {
+                            "type": channel.get("type", "Displacement"),
+                            "unit": channel.get("unit", "mil").lower(),
+                            "correctionValue": float(channel.get("correctionValue", "1.0") or "1.0"),
+                            "gain": float(channel.get("gain", "1.0") or "1.0"),
+                            "sensitivity": float(channel.get("sensitivity", "1.0") or "1.0"),
+                            "convertedSensitivity": float(channel.get("ConvertedSensitivity", channel.get("sensitivity", "1.0")) or "1.0")
+                        }
+                    break
+            logging.debug(f"Loaded channel properties: {self.channel_properties}")
+            logging.debug(f"Channel names: {self.channel_names}")
+        except Exception as e:
+            self.log_and_set_status(f"Error loading channel properties: {str(e)}")
+
+    def on_scroll_changed(self):
+        self.is_scrolling = True
+        self.scroll_debounce_timer.stop()
+        self.scroll_debounce_timer.start()
+
+    def stop_scrolling(self):
+        self.is_scrolling = False
+        self.scroll_debounce_timer.stop()
+
+    def initialize_plots(self, channel_count):
+        if not channel_count:
+            self.log_and_set_status("Cannot initialize plots: channel count not set")
             return
 
         self.plot_widgets = []
         self.plots = []
         self.fifo_data = []
         self.fifo_times = []
+        self.vlines = []
+        self.proxies = []
+        self.trackers = []
         self.needs_refresh = []
+        self.num_plots = channel_count
+        self.total_channels = channel_count
+        self.main_channels = channel_count - self.tacho_channels_count
 
         self.scroll_content = QWidget()
         self.scroll_layout = QVBoxLayout(self.scroll_content)
+        self.scroll_content.setStyleSheet("background-color: #d1d6d9; border-radius: 5px; padding: 10px;")
 
-        colors = ['r', 'g', 'b', 'y', 'c', 'm', 'k', 'b', '#FF4500', '#32CD32', '#00CED1', '#FFD700', '#FF69B4', '#8A2BE2', '#FF6347', '#20B2AA', '#ADFF2F', '#9932CC', '#FF7F50', '#00FA9A', '#9400D3']
-        self.num_plots = self.total_channels
         for i in range(self.num_plots):
-            plot_widget = PlotWidget(axisItems={'bottom': TimeAxisItem(orientation='bottom')}, background='w')
-            plot_widget.setFixedHeight(250)
-            plot_widget.setMinimumWidth(0)
-            if i < self.main_channels:
-                plot_widget.setLabel('left', f'CH{i+1} Value')
-            elif i == self.main_channels:
-                plot_widget.setLabel('left', 'Tacho Frequency')
-            else:
-                plot_widget.setLabel('left', f'Tacho Trigger {i - self.main_channels}')
-                plot_widget.setYRange(-0.5, 1.5, padding=0)
+            plot_widget = PlotWidget()
+            plot_widget.setMinimumHeight(200)
+            plot_widget.setBackground('#d1d6d9')
             plot_widget.showGrid(x=True, y=True)
             plot_widget.addLegend()
-            pen = mkPen(color=colors[i % len(colors)], width=2)
-            plot = plot_widget.plot([], [], pen=pen, name=f'Channel {i+1}')
-            self.plots.append(plot)
+            axis = TimeAxisItem(orientation='bottom')
+            plot_widget.setAxisItems({'bottom': axis})
+
+            channel_name = self.channel_names[i] if i < len(self.channel_names) else f"Channel {i + 1}"
+            unit = self.channel_properties.get(channel_name, {}).get("unit", "mil")
+            y_label = f"Amplitude ({unit})" if i < self.main_channels else "Value"
+            if i >= self.main_channels:
+                channel_name = "Frequency" if i == self.main_channels else "Trigger"
+                plot_widget.setYRange(-0.5, 1.5, padding=0)
+            plot_widget.getAxis('left').setLabel(f"{channel_name} ({y_label})")
+            plot = plot_widget.plot([], [], pen=mkPen(color=self.plot_colors[i % len(self.plot_colors)], width=1))
             self.plot_widgets.append(plot_widget)
+            self.plots.append(plot)
             self.fifo_data.append([])
             self.fifo_times.append([])
             self.needs_refresh.append(True)
-
             self.scroll_layout.addWidget(plot_widget)
+
+            vline = InfiniteLine(pos=0, angle=90, movable=False, pen=mkPen('k', width=1, style=Qt.DashLine))
+            vline.setVisible(False)
+            plot_widget.addItem(vline)
+            self.vlines.append(vline)
+            tracker = MouseTracker(plot_widget, i, self)
+            plot_widget.installEventFilter(tracker)
+            self.trackers.append(tracker)
+            proxy = SignalProxy(plot_widget.scene().sigMouseMoved, rateLimit=60, slot=lambda evt, idx=i: self.mouse_moved(evt, idx))
+            self.proxies.append(proxy)
 
         self.scroll_area.setWidget(self.scroll_content)
         self.initialize_buffers()
+        logging.debug(f"Initialized {self.num_plots} plots with {self.window_seconds}-second window")
 
     def initialize_buffers(self):
-        if not self.sample_rate or not self.num_plots or not self.samples_per_channel:
-            logging.error("Cannot initialize buffers: sample_rate, num_plots, or samples_per_channel not set")
-            self.log_and_set_status("Buffer initialization failed: Missing sample_rate, num_plots, or samples_per_channel")
+        if not self.sample_rate or not self.num_plots:
+            self.log_and_set_status("Cannot initialize buffers: sample_rate or num_plots not set")
             return
         self.fifo_window_samples = int(self.sample_rate * self.window_seconds)
-        current_time = time.time()
+        current_time = datetime.now()
         time_step = 1.0 / self.sample_rate
         for i in range(self.num_plots):
             self.fifo_data[i] = np.zeros(self.fifo_window_samples)
-            self.fifo_times[i] = np.array([current_time - (self.fifo_window_samples - 1 - j) * time_step for j in range(self.fifo_window_samples)])
+            self.fifo_times[i] = np.array([current_time - timedelta(seconds=(self.fifo_window_samples - 1 - j) * time_step) for j in range(self.fifo_window_samples)])
             self.needs_refresh[i] = True
-        logging.debug(f"Initialized FIFO buffers: {self.num_plots} channels, {self.fifo_window_samples} samples each")
         self.is_initialized = True
-        if not self.refresh_timer.isActive():
-            self.refresh_timer.start(30)
-            logging.debug("Started refresh timer after buffer initialization")
-
-    def load_project_data(self):
-        try:
-            project_data = self.db.get_project_data(self.project_name)
-            if project_data and "models" in project_data:
-                for model in project_data["models"]:
-                    if model.get("name") == self.model_name:
-                        logging.debug(f"Loaded project data for model {self.model_name}")
-                        if self.console:
-                            self.console.append_to_console(f"Loaded project data for model {self.model_name}")
-                        return
-                self.log_and_set_status(f"No model data found for {self.model_name}")
-            else:
-                self.log_and_set_status(f"No valid project data found for {self.project_name}")
-        except Exception as e:
-            self.log_and_set_status(f"Error loading project data: {str(e)}")
+        logging.debug(f"Initialized FIFO buffers: {self.num_plots} channels, {self.fifo_window_samples} samples each")
 
     def toggle_settings(self):
         self.settings_panel.setVisible(not self.settings_panel.isVisible())
@@ -262,16 +345,14 @@ class TimeViewFeature:
         try:
             selected_seconds = int(self.settings_widgets["WindowSeconds"].currentText())
             if 1 <= selected_seconds <= 10:
-                if selected_seconds != self.window_seconds:
-                    self.window_seconds = selected_seconds
-                    self.update_window_size()
-                    if self.console:
-                        self.console.append_to_console(f"Applied window size: {self.window_seconds} seconds.")
-                    self.refresh_plots()
-                self.settings_panel.setVisible(False)
-                self.settings_button.setVisible(True)
+                self.window_seconds = selected_seconds
+                self.update_window_size()
+                self.log_and_set_status(f"Applied window size: {self.window_seconds} seconds")
+                self.refresh_plots()
             else:
                 self.log_and_set_status(f"Invalid window seconds selected: {selected_seconds}. Must be 1-10.")
+            self.settings_panel.setVisible(False)
+            self.settings_button.setVisible(True)
         except Exception as e:
             self.log_and_set_status(f"Error saving TimeView settings: {str(e)}")
 
@@ -282,32 +363,30 @@ class TimeViewFeature:
 
     def update_window_size(self):
         if not self.sample_rate or not self.num_plots or not self.is_initialized:
-            logging.error("Cannot update window size: sample_rate, num_plots, or initialization not set")
-            self.log_and_set_status("Cannot update window size: Missing sample_rate, num_plots, or initialization")
+            self.log_and_set_status("Cannot update window size: sample_rate, num_plots, or initialization not set")
             return
-        new_fifo_window_samples = int(self.sample_rate * self.window_seconds)
-        if new_fifo_window_samples == self.fifo_window_samples:
+        if self.window_seconds == self.previous_window_seconds:
             logging.debug("No change in window size, skipping update")
             return
-        current_time = time.time()
+        new_fifo_window_samples = int(self.sample_rate * self.window_seconds)
+        current_time = datetime.now()
         time_step = 1.0 / self.sample_rate
         for i in range(self.num_plots):
             current_data = self.fifo_data[i]
             current_times = self.fifo_times[i]
-            current_length = len(current_data)
             new_data = np.zeros(new_fifo_window_samples)
-            new_times = np.array([current_time - (new_fifo_window_samples - 1 - j) * time_step for j in range(new_fifo_window_samples)])
-            
-            if current_length > 0:
-                copy_length = min(current_length, new_fifo_window_samples)
+            new_times = np.array([current_time - timedelta(seconds=(new_fifo_window_samples - 1 - j) * time_step) for j in range(new_fifo_window_samples)])
+            copy_length = min(len(current_data), new_fifo_window_samples)
+            if copy_length > 0:
                 new_data[-copy_length:] = current_data[-copy_length:]
                 new_times[-copy_length:] = current_times[-copy_length:] if len(current_times) >= copy_length else new_times[-copy_length:]
-            
             self.fifo_data[i] = new_data
             self.fifo_times[i] = new_times
             self.needs_refresh[i] = True
         self.fifo_window_samples = new_fifo_window_samples
+        self.previous_window_seconds = self.window_seconds
         logging.debug(f"Updated FIFO buffers to {self.window_seconds} seconds, {self.fifo_window_samples} samples")
+        self.initialize_plots(self.num_plots)
 
     def get_widget(self):
         return self.widget
@@ -325,11 +404,10 @@ class TimeViewFeature:
 
             expected_channels = len(values)
             if self.main_channels is None:
-                self.main_channels = self.parent.channel_count if hasattr(self.parent, 'channel_count') else expected_channels
-            self.tacho_channels_count = expected_channels - self.main_channels
-            if self.tacho_channels_count < 0:
-                self.log_and_set_status(f"Channel mismatch: received {expected_channels}, expected at least {self.main_channels}")
-                return
+                self.main_channels = expected_channels - self.tacho_channels_count
+                if self.main_channels < 0:
+                    self.log_and_set_status(f"Channel mismatch: received {expected_channels}, expected at least {self.tacho_channels_count} tacho channels")
+                    return
             self.total_channels = expected_channels
             self.sample_rate = sample_rate
             self.samples_per_channel = len(values[0]) if values else 0
@@ -338,24 +416,40 @@ class TimeViewFeature:
                 self.log_and_set_status(f"Channel data length mismatch: expected {self.samples_per_channel} samples")
                 return
 
-            if not self.fifo_data or len(self.fifo_data) != self.total_channels or not self.is_initialized:
+            if not self.is_initialized or len(self.fifo_data) != self.total_channels:
                 self.num_plots = self.total_channels
-                self.initialize_plots()
+                self.initialize_plots(self.total_channels)
 
-            current_time = time.time()
+            current_time = datetime.now()
             time_step = 1.0 / sample_rate
-            new_times = np.array([current_time - (self.samples_per_channel - 1 - i) * time_step for i in range(self.samples_per_channel)])
+            new_times = np.array([current_time - timedelta(seconds=(self.samples_per_channel - 1 - i) * time_step) for i in range(self.samples_per_channel)])
 
             for ch in range(self.total_channels):
+                channel_name = self.channel_names[ch] if ch < len(self.channel_names) else f"Channel {ch + 1}"
+                props = self.channel_properties.get(channel_name, {
+                    "type": "Displacement",
+                    "unit": "mil",
+                    "correctionValue": 1.0,
+                    "gain": 1.0,
+                    "sensitivity": 1.0,
+                    "convertedSensitivity": 1.0
+                })
+                volts = np.array(values[ch]) * self.scaling_factor
                 if ch < self.main_channels:
-                    new_data = np.array(values[ch]) * self.scaling_factor
+                    new_data = volts * (props["correctionValue"] * props["gain"]) / props["sensitivity"]
+                    if props["type"] == "Displacement":
+                        if props["unit"] == "mm":
+                            new_data *= 0.0254
+                        elif props["unit"] == "um":
+                            new_data *= 25.4
+                        # for mil: no change
                 elif ch == self.main_channels:
-                    new_data = np.array(values[ch]) / 100
+                    new_data = volts * 10  # divided by 100
                 else:
-                    new_data = np.array(values[ch])
+                    new_data = volts
                 if len(self.fifo_data[ch]) != self.fifo_window_samples:
                     self.fifo_data[ch] = np.zeros(self.fifo_window_samples)
-                    self.fifo_times[ch] = np.array([current_time - (self.fifo_window_samples - 1 - j) * time_step for j in range(self.fifo_window_samples)])
+                    self.fifo_times[ch] = np.array([current_time - timedelta(seconds=(self.fifo_window_samples - 1 - j) * time_step) for j in range(self.fifo_window_samples)])
                 self.fifo_data[ch] = np.roll(self.fifo_data[ch], -self.samples_per_channel)
                 self.fifo_data[ch][-self.samples_per_channel:] = new_data
                 self.fifo_times[ch] = np.roll(self.fifo_times[ch], -self.samples_per_channel)
@@ -364,7 +458,7 @@ class TimeViewFeature:
 
             for ch in range(self.total_channels):
                 if len(self.fifo_times[ch]) > 1:
-                    sort_indices = np.argsort(self.fifo_times[ch])
+                    sort_indices = np.argsort([t.timestamp() for t in self.fifo_times[ch]])
                     self.fifo_times[ch] = self.fifo_times[ch][sort_indices]
                     self.fifo_data[ch] = self.fifo_data[ch][sort_indices]
                     self.needs_refresh[ch] = True
@@ -375,19 +469,32 @@ class TimeViewFeature:
             self.log_and_set_status(f"Error processing data: {str(e)}")
 
     def refresh_plots(self):
+        if self.is_scrolling:
+            return
         try:
             for i in range(self.num_plots):
-                if self.needs_refresh[i] and len(self.fifo_data[i]) > 0:
-                    self.plots[i].setData(self.fifo_times[i], self.fifo_data[i])
+                if self.needs_refresh[i] and len(self.fifo_data[i]) > 0 and len(self.fifo_times[i]) > 0:
+                    self.plot_widgets[i].clear()
+                    self.plot_widgets[i].addLegend()
+                    self.plot_widgets[i].showGrid(x=True, y=True)
+                    channel_name = self.channel_names[i] if i < len(self.channel_names) else f"Channel {i + 1}"
+                    unit = self.channel_properties.get(channel_name, {}).get("unit", "mil")
+                    y_label = f"Amplitude ({unit})" if i < self.main_channels else "Value"
+                    if i >= self.main_channels:
+                        channel_name = "Frequency" if i == self.main_channels else "Trigger"
+                        self.plot_widgets[i].setYRange(-0.5, 1.5, padding=0)
+                    self.plot_widgets[i].getAxis('left').setLabel(f"{channel_name} ({y_label})")
+                    time_data = np.array([t.timestamp() for t in self.fifo_times[i]])
+                    pen = mkPen(color=self.plot_colors[i % len(self.plot_colors)], width=1)
+                    self.plots[i] = self.plot_widgets[i].plot(time_data, self.fifo_data[i], pen=pen, name=channel_name)
+                    if len(time_data) > 0:
+                        self.plot_widgets[i].setXRange(min(time_data), max(time_data), padding=0.1)
+                    self.plot_widgets[i].enableAutoRange(axis='y')
+                    self.plot_widgets[i].getAxis('bottom').setStyle(tickTextOffset=10)
                     self.needs_refresh[i] = False
         except Exception as e:
             logging.error(f"Error refreshing plots: {str(e)}")
             self.log_and_set_status(f"Error refreshing plots: {str(e)}")
-
-    def log_and_set_status(self, message):
-        logging.error(message)
-        if self.console:
-            self.console.append_to_console(message)
 
     def load_file(self, filename):
         try:
@@ -397,7 +504,6 @@ class TimeViewFeature:
                 return
 
             message = messages[-1]
-            values = []
             main_channels = message.get("numberOfChannels", 0)
             tacho_channels = message.get("tacoChannelCount", 0)
             samples_per_channel = message.get("samplingSize", 0)
@@ -410,7 +516,6 @@ class TimeViewFeature:
                 return
 
             total_channels = main_channels + tacho_channels
-            samples_per_channel = len(flattened_data) // total_channels if total_channels > 0 else 0
             if samples_per_channel * total_channels != len(flattened_data):
                 self.log_and_set_status(f"Data length mismatch in file {filename}")
                 return
@@ -422,25 +527,42 @@ class TimeViewFeature:
                 values.append(flattened_data[start_idx:end_idx])
 
             self.main_channels = main_channels
-            self.tacho_channels_count = tacho_channels
+            self.tacho_channels_count = tacho_channels 
             self.total_channels = total_channels
             self.sample_rate = sample_rate
             self.samples_per_channel = samples_per_channel
 
             if not self.is_initialized or len(self.fifo_data) != self.total_channels:
-                self.initialize_plots()
+                self.initialize_plots(total_channels)
 
-            current_time = time.time()
+            created_at = datetime.fromisoformat(message['createdAt'].replace('Z', '+00:00'))
             time_step = 1.0 / sample_rate
-            new_times = np.array([current_time - (samples_per_channel - 1 - i) * time_step for i in range(samples_per_channel)])
+            new_times = np.array([created_at + timedelta(seconds=i * time_step) for i in range(samples_per_channel)])
 
             for ch in range(self.total_channels):
+                channel_name = self.channel_names[ch] if ch < len(self.channel_names) else f"Channel {ch + 1}"
+                props = self.channel_properties.get(channel_name, {
+                    "type": "Displacement",
+                    "unit": "mil",
+                    "correctionValue": 1.0,
+                    "gain": 1.0,
+                    "sensitivity": 1.0,
+                    "convertedSensitivity": 1.0
+                })
+                volts = np.array(values[ch]) * self.scaling_factor
                 if ch < self.main_channels:
-                    self.fifo_data[ch] = np.array(values[ch]) * self.scaling_factor
+                    new_data = volts * (props["correctionValue"] * props["gain"]) / props["sensitivity"]
+                    if props["type"] == "Displacement":
+                        if props["unit"] == "mm":
+                            new_data *= 0.0254
+                        elif props["unit"] == "um":
+                            new_data *= 25.4
+                        # for mil: no change
                 elif ch == self.main_channels:
-                    self.fifo_data[ch] = np.array(values[ch]) / 100
+                    new_data = volts * 10   #divided by 100
                 else:
-                    self.fifo_data[ch] = np.array(values[ch])
+                    new_data = volts
+                self.fifo_data[ch] = new_data
                 self.fifo_times[ch] = new_times
                 self.needs_refresh[ch] = True
 
@@ -450,3 +572,63 @@ class TimeViewFeature:
         except Exception as e:
             logging.error(f"Error loading file {filename}: {str(e)}")
             self.log_and_set_status(f"Error loading file {filename}: {str(e)}")
+
+    def mouse_enter(self, idx):
+        self.active_line_idx = idx
+        self.vlines[idx].setVisible(True)
+
+    def mouse_leave(self, idx):
+        self.active_line_idx = None
+        for vline in self.vlines:
+            vline.setVisible(False)
+
+    def mouse_moved(self, evt, idx):
+        if self.active_line_idx is None:
+            return
+        pos = evt[0]
+        if not self.plot_widgets[idx].sceneBoundingRect().contains(pos):
+            return
+        mouse_point = self.plot_widgets[idx].plotItem.vb.mapSceneToView(pos)
+        x = mouse_point.x()
+        times = self.fifo_times[idx]
+        if len(times) > 0:
+            time_stamps = np.array([t.timestamp() for t in times])
+            if x < time_stamps[0]:
+                x = time_stamps[0]
+            elif x > time_stamps[-1]:
+                x = time_stamps[-1]
+        for vline in self.vlines:
+            vline.setPos(x)
+            vline.setVisible(True)
+
+    def log_and_set_status(self, message):
+        logging.error(message)
+        if self.console:
+            self.console.append_to_console(message)
+
+    def cleanup(self):
+        try:
+            if self.refresh_timer.isActive():
+                self.refresh_timer.stop()
+            for plot in self.plots:
+                plot.setData([], [])
+            for widget in self.plot_widgets:
+                widget.clear()
+            while self.scroll_layout.count():
+                item = self.scroll_layout.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+            self.plot_widgets = []
+            self.plots = []
+            self.fifo_data = []
+            self.fifo_times = []
+            self.vlines = []
+            self.proxies = []
+            self.trackers = []
+            self.num_plots = 0
+            if self.widget:
+                self.widget.setParent(None)
+                self.widget.deleteLater()
+            logging.debug("TimeViewFeature cleaned up")
+        except Exception as e:
+            logging.error(f"Error during cleanup: {str(e)}")
