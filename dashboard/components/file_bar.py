@@ -1,4 +1,4 @@
-from PyQt5.QtWidgets import QToolBar, QAction
+from PyQt5.QtWidgets import QToolBar, QAction, QWidget, QSizePolicy, QToolButton
 from PyQt5.QtCore import Qt, pyqtSignal
 import logging
 
@@ -19,8 +19,8 @@ class FileBar(QToolBar):
         self.current_project = None
         self.mqtt_connected = False
         self.initUI()
-        # Connect to parent's MQTT status signal
-        self.parent.mqtt_status_changed.connect(self.update_mqtt_status)
+        if hasattr(self.parent, 'mqtt_status_changed'):
+            self.parent.mqtt_status_changed.connect(self.update_mqtt_status)
 
     def initUI(self):
         self.setStyleSheet("""
@@ -50,7 +50,7 @@ class FileBar(QToolBar):
         self.setMovable(False)
         self.setFloatable(False)
 
-        # Define actions with their signals
+        # Define actions
         self.actions = {
             "Home": QAction("Home", self),
             "Open": QAction("Open", self),
@@ -61,6 +61,7 @@ class FileBar(QToolBar):
             "Refresh": QAction("Refresh", self),
             "Exit": QAction("Exit", self)
         }
+
         action_configs = [
             ("Home", "Go to Dashboard Home", self.home_triggered),
             ("Open", "Open an Existing Project", self.open_triggered),
@@ -69,15 +70,41 @@ class FileBar(QToolBar):
             ("Save", "Save Current Project Data", self.save_triggered),
             ("Settings", "Open Application Settings", self.settings_triggered),
             ("Refresh", "Refresh Current View", self.refresh_triggered),
-            ("Exit", "Exit Application", self.exit_triggered)
         ]
+
         for action_name, tooltip, signal in action_configs:
             action = self.actions[action_name]
             action.setToolTip(tooltip)
             action.triggered.connect(signal.emit)
             self.addAction(action)
 
-        # Initial state update
+        # Add spacer to push Exit to the right
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.addWidget(spacer)
+
+        # Add Exit action at far right
+        exit_action = self.actions["Exit"]
+        exit_action.setToolTip("Exit Application")
+        exit_action.triggered.connect(self.exit_triggered.emit)
+        self.addAction(exit_action)
+
+        # Get the toolbutton for the Exit action and apply red background
+        self.exit_button = self.widgetForAction(exit_action)
+        if isinstance(self.exit_button, QToolButton):
+            self.exit_button.setStyleSheet("""
+                QToolButton {
+                    background-color: #e74c3c;
+                    color: white;
+                }
+                QToolButton:hover {
+                    background-color: #c0392b;
+                }
+                QToolButton:disabled {
+                    background-color: #999;
+                }
+            """)
+
         self.update_state()
 
     def update_state(self, project_name=None, mqtt_connected=None):
@@ -88,19 +115,18 @@ class FileBar(QToolBar):
             if mqtt_connected is not None:
                 self.mqtt_connected = mqtt_connected
 
-            # Enable/disable actions based on state
-            self.actions["Home"].setEnabled(True)
-            self.actions["Open"].setEnabled(True)
-            self.actions["New"].setEnabled(True)
-            self.actions["Settings"].setEnabled(True)
-            self.actions["Exit"].setEnabled(True)
-            self.actions["Save"].setEnabled(self.current_project is not None)
-            self.actions["Edit"].setEnabled(self.current_project is not None)
-            self.actions["Refresh"].setEnabled(self.current_project is not None)
+            always_enabled = ["Home", "Open", "New", "Settings", "➔ Exit"]
+            for name in always_enabled:
+                self.actions[name].setEnabled(True)
 
-            # Update stylesheet based on project state
-            background = "#2D2F33" if self.current_project else "#f5f5f5"
-            text_color = "#fff" if self.current_project else "#333"
+            project_dependent = ["Save", "Edit", "Refresh"]
+            has_project = self.current_project is not None
+            for name in project_dependent:
+                self.actions[name].setEnabled(has_project)
+
+            # Optional: dynamic background/text color based on project
+            background = "#2D2F33" if has_project else "#f5f5f5"
+            text_color = "#fff" if has_project else "#333"
             self.setStyleSheet(f"""
                 QToolBar {{
                     background: {background};
@@ -124,6 +150,22 @@ class FileBar(QToolBar):
                     color: #666;
                 }}
             """)
+
+            # Re-apply exit button style to ensure it stays red
+            if hasattr(self, 'exit_button') and isinstance(self.exit_button, QToolButton):
+                self.exit_button.setStyleSheet("""
+                    QToolButton {
+                        background-color: #e74c3c;
+                        color: white;
+                    }
+                    QToolButton:hover {
+                        background-color: #c0392b;
+                    }
+                    QToolButton:disabled {
+                        background-color: #999;
+                    }
+                """)
+
             logging.debug(f"FileBar updated: project={self.current_project}, mqtt_connected={self.mqtt_connected}")
         except Exception as e:
             logging.error(f"Error updating FileBar state: {str(e)}")

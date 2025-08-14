@@ -14,7 +14,7 @@ class MQTTPublisher(QObject):
         self.topics = topics if isinstance(topics, list) else [topics]
         self.count = 1
 
-        self.frequency =  4 # Hz
+        self.frequency =  10 # Hz
         self.amplitude = 1.5  # Reduced amplitude for clarity (0-3.3V range)
         self.amplitude_scaled = (self.amplitude*0.5) / (3.3 / 65535)  # Scale for 16-bit ADC
         self.offset = 32768  # Midpoint for 16-bit unsigned (0-65535)
@@ -110,7 +110,7 @@ class MQTTPublisher(QObject):
 
 if __name__ == "__main__":
     app = QApplication([])
-    broker = "192.168.1.231"
+    broker = "192.168.1.239"
     topics = ["sarayu/d1/topic1"]
     mqtt_publisher = MQTTPublisher(broker, topics)
     app.exec_()

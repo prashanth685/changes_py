@@ -99,10 +99,20 @@ class TreeView(QWidget):
                         self.model_selected.emit(self.selected_model)
                         self.console_message(f"Automatically selected model: {self.selected_model}")
                         break
+
+            # ✅ Automatically expand all children (project > model > channels)
+            self.expand_all_children(project_item)
+
         except Exception as e:
             logging.error(f"Error adding project to tree: {str(e)}")
             self.console_message(f"Error adding project to tree: {str(e)}")
             QMessageBox.warning(self, "Error", f"Error adding project to tree: {str(e)}")
+
+    def expand_all_children(self, item):
+        """Recursively expand all child items in the QTreeWidget."""
+        item.setExpanded(True)
+        for i in range(item.childCount()):
+            self.expand_all_children(item.child(i))
 
     def handle_item_clicked(self, item, column):
         data = item.data(0, Qt.UserRole)
@@ -129,12 +139,11 @@ class TreeView(QWidget):
                 item.setBackground(0, QColor("#4a90e2"))
                 self.model_selected.emit(self.selected_model)
             elif data["type"] == "channel":
-                self.selected_channel = data["channel_name"]  # Use channel_name instead of name
+                self.selected_channel = data["channel_name"]
                 self.selected_channel_item = item
                 self.selected_model = data["model"]
                 item.setBackground(0, QColor("#28a745"))
                 self.channel_selected.emit(self.selected_model, self.selected_channel)
-                # Trigger feature display for the current feature if set
                 if hasattr(self.parent_widget, 'current_feature') and self.parent_widget.current_feature:
                     self.feature_requested.emit(self.parent_widget.current_feature, self.selected_model, self.selected_channel)
             self.console_message(f"Selected: {data['type']} - {data.get('channel_name', data.get('name', 'Unknown'))}")
