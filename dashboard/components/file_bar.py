@@ -59,7 +59,7 @@ class FileBar(QToolBar):
             "Save": QAction("Save", self),
             "Settings": QAction("Settings", self),
             "Refresh": QAction("Refresh", self),
-            "Exit": QAction("Exit", self)
+            "↪️ Exit": QAction("↪️ Exit", self)
         }
 
         action_configs = [
@@ -84,7 +84,7 @@ class FileBar(QToolBar):
         self.addWidget(spacer)
 
         # Add Exit action at far right
-        exit_action = self.actions["Exit"]
+        exit_action = self.actions["↪️ Exit"]
         exit_action.setToolTip("Exit Application")
         exit_action.triggered.connect(self.exit_triggered.emit)
         self.addAction(exit_action)
@@ -115,7 +115,7 @@ class FileBar(QToolBar):
             if mqtt_connected is not None:
                 self.mqtt_connected = mqtt_connected
 
-            always_enabled = ["Home", "Open", "New", "Settings", "➔ Exit"]
+            always_enabled = ["Home", "Open", "New", "Settings", "↪️ Exit"]
             for name in always_enabled:
                 self.actions[name].setEnabled(True)
 
