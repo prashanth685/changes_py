@@ -81,6 +81,11 @@ class DashboardWindow(QWidget):
         self.create_project_widget = None
         self.project_structure_widget = None
         self.saving_filenames = {}
+        # New: store last frequency selection payload per model
+        self.last_selection_payload_by_model = {}
+        # Track the currently open FrequencyPlot subwindow key to close on selection
+        self._freqplot_key = None
+
         self.initUI()
         self.deferred_initialization()
 
@@ -89,62 +94,64 @@ class DashboardWindow(QWidget):
         self.setWindowState(Qt.WindowMaximized)
         app = QApplication.instance()
         app.setStyleSheet("""
-            QInputDialog, QMessageBox {
-                background-color: #1e2937;
-                color: white;
-                font-size: 16px;
-                border: 1px solid #2c3e50;
-                border-radius: 8px;
-                padding: 15px;
-                width:500px;
-            }
-            QInputDialog QLineEdit {
-                background-color: #2c3e50;
-                color: white;
-                border: 1px solid #4a90e2;
-                padding: 8px;
-                border-radius: 4px;
-                font-size: 15px;
-            }
-            QInputDialog QLabel,
-            QMessageBox QLabel {
-                color: #ecf0f1;
-                font-size: 16px;
-                padding-bottom: 10px;
-            }
-            QInputDialog QPushButton,
-            QMessageBox QPushButton {
-                background-color: #4a90e2;
-                color: white;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 5px;
-                font-size: 15px;
-                min-width: 80px;
-                transition: background-color 0.2s ease;
-            }
-            QInputDialog QPushButton:hover,
-            QMessageBox QPushButton:hover {
-                background-color: #357abd;
-            }
-            QInputDialog QPushButton:pressed,
-            QMessageBox QPushButton:pressed {
-                background-color: #2c5d9b;
-            }
-            QMdiSubWindow {
-                background-color: #d1d6d9;
-                border: 1px solid #d1d6d9;
-                border-radius: 4px;
-            }
-            QMdiSubWindow > QWidget {
-                background-color: #d1d6d9;
-                color: #ecf0f1;
-            }
+        QInputDialog, QMessageBox {
+            background-color: #1e2937;
+            color: white;
+            font-size: 16px;
+            border: 1px solid #2c3e50;
+            border-radius: 8px;
+            padding: 15px;
+            width:500px;
+        }
+        QInputDialog QLineEdit {
+            background-color: #2c3e50;
+            color: white;
+            border: 1px solid #4a90e2;
+            padding: 8px;
+            border-radius: 4px;
+            font-size: 15px;
+        }
+        QInputDialog QLabel,
+        QMessageBox QLabel {
+            color: #ecf0f1;
+            font-size: 16px;
+            padding-bottom: 10px;
+        }
+        QInputDialog QPushButton,
+        QMessageBox QPushButton {
+            background-color: #4a90e2;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 5px;
+            font-size: 15px;
+            min-width: 80px;
+            transition: background-color 0.2s ease;
+        }
+        QInputDialog QPushButton:hover,
+        QMessageBox QPushButton:hover {
+            background-color: #357abd;
+        }
+        QInputDialog QPushButton:pressed,
+        QMessageBox QPushButton:pressed {
+            background-color: #2c5d9b;
+        }
+        QMdiSubWindow {
+            background-color: #d1d6d9;
+            border: 1px solid #d1d6d9;
+            border-radius: 4px;
+        }
+        QMdiSubWindow > QWidget {
+            background-color: #d1d6d9;
+            color: #ecf0f1;
+        }
         """)
+
         main_layout = QVBoxLayout()
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
         self.setLayout(main_layout)
+
         self.file_bar = FileBar(self)
         self.file_bar.home_triggered.connect(self.display_dashboard)
         self.file_bar.open_triggered.connect(self.open_project)
@@ -155,56 +162,70 @@ class DashboardWindow(QWidget):
         self.file_bar.refresh_triggered.connect(self.refresh_action)
         self.file_bar.exit_triggered.connect(self.close)
         main_layout.addWidget(self.file_bar)
+
         self.tool_bar = ToolBar(self)
         self.tool_bar.feature_selected.connect(self.display_feature_content)
         main_layout.addWidget(self.tool_bar)
+
         self.sub_tool_bar = SubToolBar(self)
         self.sub_tool_bar.start_saving_triggered.connect(self.start_saving)
         self.sub_tool_bar.stop_saving_triggered.connect(self.stop_saving)
         self.sub_tool_bar.connect_mqtt_triggered.connect(self.connect_mqtt)
         self.sub_tool_bar.disconnect_mqtt_triggered.connect(self.disconnect_mqtt)
         self.sub_tool_bar.open_file_triggered.connect(self.handle_open_file)
+
         central_widget = QWidget()
         central_layout = QVBoxLayout()
         central_layout.setContentsMargins(0, 0, 0, 0)
         central_layout.setSpacing(0)
         central_widget.setLayout(central_layout)
         main_layout.addWidget(central_widget, 1)
+
         self.main_splitter = QSplitter(Qt.Horizontal)
         self.main_splitter.setContentsMargins(0, 0, 0, 0)
         self.main_splitter.setHandleWidth(1)
         self.main_splitter.setStyleSheet("QSplitter::handle { background-color: #2c3e50; }")
         central_layout.addWidget(self.main_splitter)
+
         self.tree_view = TreeView(self)
         self.tree_view.setVisible(False)
         self.main_splitter.addWidget(self.tree_view)
+
         right_container = QWidget()
         right_container.setStyleSheet("background-color: #d1d6d9;")
         right_layout = QVBoxLayout()
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(0)
         right_container.setLayout(right_layout)
+
         self.sub_tool_bar.setVisible(False)
         right_layout.addWidget(self.sub_tool_bar)
+
         self.main_section = MainSection(self)
         right_layout.addWidget(self.main_section, 1)
         self.main_splitter.addWidget(right_container)
+
         window_width = self.width() if self.width() > 0 else 1200
         tree_view_width = int(window_width * 0.15)
         right_container_width = int(window_width * 0.85)
         self.main_splitter.setSizes([tree_view_width, right_container_width])
+
         self.console = Console(self)
         self.mqtt_status = MQTTStatus(self)
+
         self.console_layout = QVBoxLayout()
         self.console_layout.setContentsMargins(0, 0, 0, 0)
         self.console_layout.setSpacing(0)
+
         self.console_container = QWidget()
         self.console_container.setStyleSheet("background-color: black;")
         self.console_container.setFixedHeight(80)
         self.console_container.setLayout(self.console_layout)
+
         self.console_layout.addWidget(self.console.button_container)
         self.console_layout.addWidget(self.console.console_message_area)
         self.console_layout.addWidget(self.mqtt_status)
+
         main_layout.addWidget(self.console_container)
 
     def deferred_initialization(self):
@@ -260,15 +281,18 @@ class DashboardWindow(QWidget):
             QMessageBox.warning(self, "Error", "No project selected to edit!")
             logging.warning("Attempted to edit project with no project selected")
             return
+
         self.clear_content_layout()
         self.tree_view.setVisible(False)
         self.sub_tool_bar.setVisible(False)
+
         project_data = self.db.get_project_data(self.current_project)
         if not project_data:
             self.console.append_to_console(f"Error: Project {self.current_project} not found.")
             logging.error(f"Project {self.current_project} not found!")
             self.display_select_project()
             return
+
         self.create_project_widget = CreateProjectWidget(
             self,
             edit_mode=True,
@@ -318,11 +342,13 @@ class DashboardWindow(QWidget):
             logging.error(f"Project {project_name} not found!")
             self.display_select_project()
             return
+
         channel_count_map = {
             "DAQ4CH": 4,
             "DAQ8CH": 8,
             "DAQ10CH": 10
         }
+
         raw_channel_count = project_data.get("channel_count", 4)
         try:
             if isinstance(raw_channel_count, str):
@@ -335,22 +361,27 @@ class DashboardWindow(QWidget):
             self.console.append_to_console(f"Error: Invalid channel count {raw_channel_count} for project {project_name}. Defaulting to 4.")
             logging.error(f"Invalid channel count {raw_channel_count} for project {project_name}: {str(e)}. Defaulting to 4.")
             self.channel_count = 4
+
         self.setWindowTitle(f'Sarayu Desktop Application - {self.current_project.upper()}')
         self.tree_view.setVisible(True)
         self.sub_tool_bar.setVisible(True)
+
         window_width = self.width() if self.width() > 0 else 1200
         tree_view_width = int(window_width * 0.15)
         right_container_width = int(window_width * 0.85)
         self.main_splitter.setSizes([tree_view_width, right_container_width])
+
         logging.debug(f"TreeView visibility: {self.tree_view.isVisible()}")
         logging.debug(f"SubToolBar visibility: {self.sub_tool_bar.isVisible()}")
         logging.debug(f"Loading project: {project_name} with {self.channel_count} channels")
         self.console.append_to_console(f"Loaded project {project_name} with {self.channel_count} channels")
+
         self.clear_content_layout()
         if self.project_structure_widget:
             self.project_structure_widget.setParent(None)
             self.project_structure_widget = None
-        logging.debug("ProjectStructureWidget removed from MainSection")
+            logging.debug("ProjectStructureWidget removed from MainSection")
+
         self.file_bar.update_state(project_name=project_name)
         self.project_changed.emit(project_name)
         self.load_project_features()
@@ -361,6 +392,7 @@ class DashboardWindow(QWidget):
             logging.warning("No project selected for MQTT setup")
             self.console.append_to_console("No project selected for MQTT setup")
             return
+
         self.cleanup_mqtt()
         try:
             tags = self.get_project_tags()
@@ -431,7 +463,7 @@ class DashboardWindow(QWidget):
                             instance_feature, instance_model, instance_channel,
                             feature_instance, tag_name, values, sample_rate, frame_index
                         ))
-                        logging.debug(f"Processed data for {feature_name}/{model_name}/channel_{channel_index}, frame {frame_index}")
+            logging.debug(f"Processed data for {feature_name}/{model_name}/channel_{channel_index}, frame {frame_index}")
         except Exception as e:
             logging.error(f"Error in on_data_received for {feature_name}/{model_name}/channel_{channel_index}, frame {frame_index}: {str(e)}")
             self.console.append_to_console(f"Error processing data for {feature_name}: {str(e)}")
@@ -452,24 +484,29 @@ class DashboardWindow(QWidget):
         try:
             if not self.db.is_connected():
                 self.db.reconnect()
+
             self.tree_view.tree.clear()
             self.tree_view.add_project_to_tree(self.current_project)
+
             project_data = self.db.get_project_data(self.current_project)
             if not project_data or "models" not in project_data:
                 logging.warning(f"No models found for project: {self.current_project}")
                 self.console.append_to_console(f"No models found for project: {self.current_project}")
                 return
+
             for model in project_data["models"]:
                 model_name = model.get("name")
                 if model_name:
                     self.tree_view.add_model_to_tree(self.current_project, model_name)
                     for channel_idx in range(1, self.channel_count + 1):
                         self.tree_view.add_channel_to_model(self.current_project, model_name, f"Channel_{channel_idx}")
+
             for i in range(self.tree_view.tree.topLevelItemCount()):
                 item = self.tree_view.tree.topLevelItem(i)
                 if item.text(0) == f"📁 {self.current_project}":
                     item.setExpanded(True)
                     self.tree_view.tree.setCurrentItem(item)
+
             logging.debug(f"Loaded project features for {self.current_project} with {self.channel_count} channels")
             self.console.append_to_console(f"Populated tree view for project: {self.current_project}")
         except Exception as e:
@@ -501,17 +538,19 @@ class DashboardWindow(QWidget):
         if selected_model in self.saving_filenames:
             QMessageBox.warning(self, "Error", f"Already saving data for model {selected_model}!")
             return
+
         filename = self.sub_tool_bar.filename_edit.text()
         if not filename:
             filename = self.get_next_filename(selected_model)
+
         if self.mqtt_handler:
             self.mqtt_handler.start_saving(selected_model, filename)
-        self.saving_filenames[selected_model] = filename
-        self.is_saving = bool(self.saving_filenames)
-        self.saving_state_changed.emit(self.is_saving)
-        logging.info(f"Started saving data to filename: {filename} for model {selected_model}")
-        if self.console:
-            self.console.append_to_console(f"Started saving data to {filename} for model {selected_model}")
+            self.saving_filenames[selected_model] = filename
+            self.is_saving = bool(self.saving_filenames)
+            self.saving_state_changed.emit(self.is_saving)
+            logging.info(f"Started saving data to filename: {filename} for model {selected_model}")
+            if self.console:
+                self.console.append_to_console(f"Started saving data to {filename} for model {selected_model}")
 
     def stop_saving(self):
         selected_model = self.tree_view.get_selected_model()
@@ -521,15 +560,16 @@ class DashboardWindow(QWidget):
         if selected_model not in self.saving_filenames:
             QMessageBox.warning(self, "Error", f"Not saving data for model {selected_model}!")
             return
+
         if self.mqtt_handler:
             self.mqtt_handler.stop_saving(selected_model)
-        del self.saving_filenames[selected_model]
-        self.is_saving = bool(self.saving_filenames)
-        self.saving_state_changed.emit(self.is_saving)
-        logging.info(f"Stopped saving data for model {selected_model}")
-        if self.console:
-            self.console.append_to_console(f"Stopped saving data for model {selected_model}")
-        self.sub_tool_bar.refresh_filename()
+            del self.saving_filenames[selected_model]
+            self.is_saving = bool(self.saving_filenames)
+            self.saving_state_changed.emit(self.is_saving)
+            logging.info(f"Stopped saving data for model {selected_model}")
+            if self.console:
+                self.console.append_to_console(f"Stopped saving data for model {selected_model}")
+            self.sub_tool_bar.refresh_filename()
 
     def display_feature_content(self, feature_name):
         try:
@@ -538,32 +578,38 @@ class DashboardWindow(QWidget):
                 self.console.append_to_console(f"No project selected for {feature_name}.")
                 logging.warning(f"No project selected for {feature_name}")
                 return
+
             self.current_feature = feature_name
             self.is_saving = bool(self.saving_filenames)
             self.saving_state_changed.emit(self.is_saving)
             self.sub_tool_bar.setVisible(True)
+
             current_console_height = self.console.console_message_area.height()
             selected_model = self.tree_view.get_selected_model()
             if not selected_model:
                 self.console.append_to_console(f"Please select a model to view {feature_name}.")
                 logging.warning(f"No model selected for {feature_name}")
                 return
+
             project_data = self.db.get_project_data(self.current_project)
             if not project_data:
                 self.console.append_to_console(f"Project {self.current_project} not found in database.")
                 logging.error(f"Project {self.current_project} not found!")
                 return
+
             model = next((m for m in project_data["models"] if m["name"] == selected_model), None)
             if not model:
                 self.console.append_to_console(f"Model {selected_model} not found in project {self.current_project}.")
                 logging.error(f"Model {selected_model} not found in project {self.current_project}!")
                 return
-            selected_channel = self.tree_view.get_selected_channel() if feature_name not in ["Time View", "Time Report", "Tabular View"] else None
-            if not selected_channel and feature_name not in ["Time View", "Time Report", "Tabular View"]:
+
+            selected_channel = self.tree_view.get_selected_channel() if feature_name not in ["Time View", "Time Report", "Tabular View", "Multiple Trend View"] else None
+            if not selected_channel and feature_name not in ["Time View", "Time Report", "Tabular View", "Multiple Trend View"]:
                 self.console.append_to_console(f"Please select a channel for {feature_name} in model {selected_model}.")
                 logging.warning(f"No channel selected for {feature_name} in model {selected_model}")
                 return
-            channel_list = [None] if feature_name in ["Time View", "Time Report", "Tabular View"] else [selected_channel]
+
+            channel_list = [None] if feature_name in ["Time View", "Time Report", "Tabular View", "Multiple Trend View"] else [selected_channel]
             feature_classes = {
                 "Tabular View": TabularViewFeature,
                 "Time View": TimeViewFeature,
@@ -579,16 +625,19 @@ class DashboardWindow(QWidget):
                 "Polar Plot": PolarPlotFeature,
                 "Report": ReportFeature
             }
+
             if feature_name not in feature_classes:
                 logging.warning(f"Unknown feature: {feature_name}")
                 QMessageBox.warning(self, "Error", f"Unknown feature: {feature_name}")
                 return
+
             for channel in channel_list:
                 unique_id = int(time.time() * 1000)
                 key = (feature_name, selected_model, channel, unique_id)
                 try:
                     if not self.db.is_connected():
                         self.db.reconnect()
+
                     feature_kwargs = {
                         "parent": self,
                         "db": self.db,
@@ -597,15 +646,19 @@ class DashboardWindow(QWidget):
                         "model_name": selected_model,
                         "console": self.console
                     }
-                    if feature_name in ["Orbit", "FFT"]:
+                    if feature_name in ["Orbit", "FFT", "Waterfall"]:
                         feature_kwargs["channel_count"] = self.channel_count
+
                     feature_instance = feature_classes[feature_name](**feature_kwargs)
+
                     if feature_name == "Tabular View":
                         logging.debug(f"TabularViewFeature initialized for model {selected_model}, channel {channel or 'None'}; displays all {self.channel_count} channels")
                     else:
                         logging.debug(f"Initialized {feature_name} for model {selected_model}, channel {channel or 'None'}")
+
                     if feature_name in ["Orbit", "FFT"] and channel and hasattr(feature_instance, 'update_selected_channel'):
                         feature_instance.update_selected_channel(channel)
+
                     self.feature_instances[key] = feature_instance
                     widget = feature_instance.get_widget()
                     if widget:
@@ -628,12 +681,23 @@ class DashboardWindow(QWidget):
                         logging.error(f"Feature {feature_name} returned invalid widget")
                         QMessageBox.warning(self, "Error", f"Feature {feature_name} failed to initialize")
                         del self.feature_instances[key]
+
+                    # If a saved selection exists for this model, load it
+                    payload = self.last_selection_payload_by_model.get(selected_model)
+                    if payload and hasattr(feature_instance, "load_selected_frame"):
+                        try:
+                            feature_instance.load_selected_frame(payload)
+                            self.console.append_to_console(f"{feature_name}: loaded frame {payload.get('frameIndex')} from {payload.get('filename')}")
+                        except Exception as e:
+                            self.console.append_to_console(f"{feature_name}: error loading selected frame: {e}")
+
                     self.console.console_message_area.setFixedHeight(current_console_height)
                 except Exception as e:
                     logging.error(f"Failed to load feature {feature_name} for channel {channel or 'No Channel'}: {str(e)}")
                     QMessageBox.warning(self, "Error", f"Failed to load {feature_name}: {str(e)}")
                     if key in self.feature_instances:
                         del self.feature_instances[key]
+
             self.main_section.arrange_layout()
             self.console.console_message_area.setFixedHeight(current_console_height)
         except Exception as e:
@@ -641,7 +705,15 @@ class DashboardWindow(QWidget):
             QMessageBox.warning(self, "Error", f"Error displaying feature: {str(e)}")
 
     def handle_open_file(self, file_data):
+        """
+        Open FrequencyPlot to occupy full main section.
+        After user selects frameIndex (time_range_selected), close the FrequencyPlot window
+        and store the selection payload for feature usage.
+        """
         try:
+            # Make FrequencyPlot occupy full main section: close all current subwindows
+            self.clear_content_layout()
+
             freq_plot = FrequencyPlot(
                 parent=self,
                 project_name=file_data["project_name"],
@@ -649,6 +721,10 @@ class DashboardWindow(QWidget):
                 filename=file_data["filename"],
                 email=self.email
             )
+            # Connect selection from FrequencyPlot
+            freq_plot.time_range_selected.connect(self.on_frequency_selection)
+
+            # Add as a single subwindow
             sub_window = self.main_section.add_subwindow(
                 freq_plot,
                 "Frequency Plot",
@@ -656,28 +732,128 @@ class DashboardWindow(QWidget):
                 channel_name=file_data["filename"]
             )
             if sub_window:
-                sub_window.closeEvent = lambda event: self.on_subwindow_closed(event, ("Frequency Plot", file_data["model_name"], file_data["filename"], id(freq_plot)))
+                # Track key for closing later on selection
+                self._freqplot_key = ("Frequency Plot", file_data["model_name"], file_data["filename"], id(freq_plot))
+                self.sub_windows[self._freqplot_key] = sub_window
+                sub_window.closeEvent = lambda event, k=self._freqplot_key: self.on_subwindow_closed(event, k)
                 sub_window.show()
+                # Maximize to occupy full space
+                try:
+                    sub_window.showMaximized()
+                except Exception:
+                    pass
                 self.main_section.arrange_layout()
-                logging.debug(f"Opened FrequencyPlot for {file_data}")
+                logging.debug(f"Opened FrequencyPlot for {file_data} occupying full main section")
+                self.console.append_to_console(f"Opened FrequencyPlot for {file_data['filename']} (model: {file_data['model_name']})")
             else:
                 logging.error(f"Failed to open FrequencyPlot subwindow for {file_data}")
+                self.console.append_to_console("Failed to open Frequency Plot window")
         except Exception as e:
             logging.error(f"Error handling open file: {str(e)}")
             QMessageBox.warning(self, "Error", f"Failed to open file: {str(e)}")
+
+    def _open_feature_and_load_frame(self, feature_class, feature_name, model_name, payload, channel=None, with_channel_count=False):
+        """
+        Retained helper (for programmatic openings). Not auto-invoked after Frequency selection in this flow.
+        """
+        unique_id = int(time.time() * 1000)
+        key = (feature_name, model_name, channel, unique_id)
+        feature_kwargs = {
+            "parent": self,
+            "db": self.db,
+            "project_name": self.current_project,
+            "channel": channel,
+            "model_name": model_name,
+            "console": self.console
+        }
+        if with_channel_count:
+            feature_kwargs["channel_count"] = self.channel_count
+        feature_instance = feature_class(**feature_kwargs)
+        widget = feature_instance.get_widget()
+        if not widget:
+            self.console.append_to_console(f"{feature_name} failed to initialize")
+            return
+        sub_window = self.main_section.add_subwindow(
+            widget,
+            feature_name,
+            channel_name=channel,
+            model_name=model_name
+        )
+        if not sub_window:
+            self.console.append_to_console(f"Failed to create {feature_name} subwindow")
+            return
+        self.feature_instances[key] = feature_instance
+        self.sub_windows[key] = sub_window
+        sub_window.closeEvent = lambda event, k=key: self.on_subwindow_closed(event, k)
+        sub_window.show()
+        if hasattr(feature_instance, "load_selected_frame"):
+            try:
+                feature_instance.load_selected_frame(payload)
+                self.console.append_to_console(f"{feature_name}: loaded frame {payload.get('frameIndex')} from {payload.get('filename')}")
+            except Exception as e:
+                self.console.append_to_console(f"{feature_name}: error loading selected frame: {e}")
+        else:
+            self.console.append_to_console(f"{feature_name}: load_selected_frame not available")
+        self.main_section.arrange_layout()
+
+    def on_frequency_selection(self, selected_payload: dict):
+        """
+        Handle selection from FrequencyPlot:
+        - Save payload per model,
+        - Close FrequencyPlot window immediately,
+        - Let user click desired features; those features will consume the saved payload.
+        """
+        try:
+            model_name = selected_payload.get("model")
+            if not self.current_project or not model_name:
+                self.console.append_to_console("Project or model missing for selection.")
+                return
+
+            # Save last selection for the model
+            self.last_selection_payload_by_model[model_name] = selected_payload
+            self.console.append_to_console(
+                f"Selected frame {selected_payload.get('frameIndex')} from {selected_payload.get('filename')} "
+                f"stored for model {model_name}. Now choose a feature to view."
+            )
+
+            # Close FrequencyPlot window immediately
+            if self._freqplot_key and self._freqplot_key in self.sub_windows:
+                try:
+                    sw = self.sub_windows.get(self._freqplot_key)
+                    if sw:
+                        if sw.isMaximized():
+                            sw.showNormal()
+                        sw.close()
+                        self.main_section.mdi_area.removeSubWindow(sw)
+                        sw.setParent(None)
+                        sw.deleteLater()
+                    del self.sub_windows[self._freqplot_key]
+                    self._freqplot_key = None
+                    # Rearrange layout after removal
+                    self.main_section.arrange_layout()
+                except Exception as e:
+                    logging.error(f"Error closing FrequencyPlot window after selection: {e}")
+
+            # No auto-opening of features here. User clicks desired features next.
+        except Exception as e:
+            logging.error(f"Failed to handle frequency selection: {str(e)}")
+            self.console.append_to_console(f"Error applying selection: {str(e)}")
 
     def on_subwindow_closed(self, event, key):
         try:
             feature_name, model_name, channel_name, unique_id = key
             logging.debug(f"Closing subwindow for key: {key}, ID: {id(self.sub_windows.get(key))}")
+
             sub_window = self.sub_windows.get(key)
             if not sub_window:
                 logging.warning(f"No subwindow found for key: {key}")
                 event.accept()
                 return
+
             if sub_window.isMaximized():
                 sub_window.showNormal()
                 logging.debug(f"Restored maximized subwindow for {key}")
+
             if key in self.feature_instances:
                 instance = self.feature_instances[key]
                 if hasattr(instance, 'cleanup'):
@@ -697,6 +873,7 @@ class DashboardWindow(QWidget):
                         logging.error(f"Error cleaning up widget for {key}: {str(e)}")
                 del self.feature_instances[key]
                 logging.debug(f"Removed feature instance for {key}")
+
             try:
                 sub_window.close()
                 self.main_section.mdi_area.removeSubWindow(sub_window)
@@ -706,12 +883,14 @@ class DashboardWindow(QWidget):
             except Exception as e:
                 logging.error(f"Error removing subwindow for {key}: {str(e)}")
             del self.sub_windows[key]
+
             if self.current_feature == feature_name:
                 if not any(k[0] == feature_name for k in self.feature_instances.keys()):
                     self.current_feature = None
                     self.is_saving = bool(self.saving_filenames)
                     self.saving_state_changed.emit(self.is_saving)
                     logging.debug(f"Reset current_feature as no instances of {feature_name} remain")
+
             self.main_section.mdi_area.update()
             self.main_section.scroll_area.viewport().update()
             self.main_section.arrange_layout()
@@ -767,6 +946,7 @@ class DashboardWindow(QWidget):
                         logging.error(f"Error closing subwindow {key}: {str(e)}")
             self.sub_windows.clear()
             logging.debug("Cleared all subwindows")
+
             for key in list(self.feature_instances.keys()):
                 try:
                     instance = self.feature_instances[key]
@@ -783,6 +963,7 @@ class DashboardWindow(QWidget):
                     logging.debug(f"Removed feature instance for {key}")
                 except Exception as e:
                     logging.error(f"Error cleaning up feature instance {key}: {str(e)}")
+
             self.main_section.clear_widget()
             self.main_section.mdi_area.setMinimumSize(0, 0)
             self.main_section.mdi_area.update()
@@ -853,6 +1034,3 @@ class DashboardWindow(QWidget):
         except Exception as e:
             logging.error(f"Failed to disconnect MQTT: {str(e)}")
             self.console.append_to_console(f"Failed to disconnect MQTT: {str(e)}")
-
-
-

@@ -32,31 +32,38 @@ class FFTViewFeature:
         self.channel_name = channel
         self.model_name = model_name
         self.console = console
+
         self.widget = None
         self.magnitude_plot_widget = None
         self.phase_plot_widget = None
         self.magnitude_plot_item = None
         self.phase_plot_item = None
+
         self.sample_rate = 1000
         self.channel_index = self.resolve_channel_index(channel) if channel is not None else None
         self.latest_data = None
+
         self.update_timer = QTimer()
         self.update_timer.timeout.connect(self.update_plot)
         self.update_interval = 200
         self.max_samples = 4096
         self.layout_type = layout
-        self.mongo_client = self.db.client  # Use existing client from db
+
+        self.mongo_client = self.db.client
         self.project_id = None
         self.settings = FFTSettings(None)
         self.data_buffer = []
+
         self.settings_panel = None
         self.settings_button = None
         self.channel_count = channel_count
         self.last_frame_index = -1
         self.is_saving = False
         self.current_filename = None
+
         self.initUI()
         self.initialize_async()
+
         if self.console:
             self.console.append_to_console(f"Initialized FFTViewFeature for {self.model_name}/{self.channel_name or 'No Channel'} with {self.channel_count} channels")
 
@@ -108,21 +115,17 @@ class FFTViewFeature:
         top_layout.addStretch()
         self.settings_button = QPushButton("⚙️ Settings")
         self.settings_button.setStyleSheet("""
-            QPushButton {
-                background-color: #4CAF50;
-                color: white;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 4px;
-                font-size: 14px;
-                min-width: 代表px;
-            }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-            QPushButton:pressed {
-                background-color: #3d8b40;
-            }
+        QPushButton {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            font-size: 14px;
+            min-width: 120px;
+        }
+        QPushButton:hover { background-color: #45a049; }
+        QPushButton:pressed { background-color: #3d8b40; }
         """)
         self.settings_button.clicked.connect(self.toggle_settings)
         top_layout.addWidget(self.settings_button)
@@ -130,23 +133,19 @@ class FFTViewFeature:
 
         self.settings_panel = QWidget()
         self.settings_panel.setStyleSheet("""
-            QWidget {
-                background-color: #f5f5f5;
-                border: 1px solid #d0d0d0;
-                border-radius: 4px;
-                padding: 10px;
-            }
+        QWidget {
+            background-color: #f5f5f5;
+            border: 1px solid #d0d0d0;
+            border-radius: 4px;
+            padding: 10px;
+        }
         """)
         self.settings_panel.setVisible(False)
+
         settings_layout = QGridLayout()
         settings_layout.setSpacing(10)
         self.settings_panel.setLayout(settings_layout)
 
-        settings_labels = [
-            "Window Type", "Start Frequency (Hz)", "Stop Frequency (Hz)",
-            "Number of Lines", "Overlap Percentage (%)", "Averaging Mode",
-            "Number of Averages", "Weighting Mode", "Linear Mode"
-        ]
         self.settings_widgets = {}
 
         window_label = QLabel("Window Type")
@@ -156,13 +155,7 @@ class FFTViewFeature:
         window_combo.addItems(["Hamming", "Hanning", "Blackman", "Flat-top", "None"])
         window_combo.setCurrentText(self.settings.window_type)
         window_combo.setStyleSheet("""
-            QComboBox {
-                padding: 5px;
-                border: 1px solid #d0d0d0;
-                border-radius: 4px;
-                background-color: white;
-                min-width: 100px;
-            }
+        QComboBox { padding: 5px; border: 1px solid #d0d0d0; border-radius: 4px; background-color: white; min-width: 100px; }
         """)
         settings_layout.addWidget(window_combo, 0, 1)
         self.settings_widgets["WindowType"] = window_combo
@@ -173,13 +166,7 @@ class FFTViewFeature:
         start_freq_edit = QLineEdit(str(self.settings.start_frequency))
         start_freq_edit.setValidator(QDoubleValidator(0.0, 10000.0, 2))
         start_freq_edit.setStyleSheet("""
-            QLineEdit {
-                padding: 5px;
-                border: 1px solid #d0d0d0;
-                border-radius: 4px;
-                background-color: white;
-                min-width: 100px;
-            }
+        QLineEdit { padding: 5px; border: 1px solid #d0d0d0; border-radius: 4px; background-color: white; min-width: 100px; }
         """)
         settings_layout.addWidget(start_freq_edit, 1, 1)
         self.settings_widgets["StartFrequency"] = start_freq_edit
@@ -190,13 +177,7 @@ class FFTViewFeature:
         stop_freq_edit = QLineEdit(str(self.settings.stop_frequency))
         stop_freq_edit.setValidator(QDoubleValidator(0.0, 10000.0, 2))
         stop_freq_edit.setStyleSheet("""
-            QLineEdit {
-                padding: 5px;
-                border: 1px solid #d0d0d0;
-                border-radius: 4px;
-                background-color: white;
-                min-width: 100px;
-            }
+        QLineEdit { padding: 5px; border: 1px solid #d0d0d0; border-radius: 4px; background-color: white; min-width: 100px; }
         """)
         settings_layout.addWidget(stop_freq_edit, 2, 1)
         self.settings_widgets["StopFrequency"] = stop_freq_edit
@@ -207,13 +188,7 @@ class FFTViewFeature:
         lines_edit = QLineEdit(str(self.settings.number_of_lines))
         lines_edit.setValidator(QIntValidator(100, 3200))
         lines_edit.setStyleSheet("""
-            QLineEdit {
-                padding: 5px;
-                border: 1px solid #d0d0d0;
-                border-radius: 4px;
-                background-color: white;
-                min-width: 100px;
-            }
+        QLineEdit { padding: 5px; border: 1px solid #d0d0d0; border-radius: 4px; background-color: white; min-width: 100px; }
         """)
         settings_layout.addWidget(lines_edit, 3, 1)
         self.settings_widgets["NumberOfLines"] = lines_edit
@@ -224,13 +199,7 @@ class FFTViewFeature:
         overlap_edit = QLineEdit(str(self.settings.overlap_percentage))
         overlap_edit.setValidator(QDoubleValidator(0.0, 99.9, 2))
         overlap_edit.setStyleSheet("""
-            QLineEdit {
-                padding: 5px;
-                border: 1px solid #d0d0d0;
-                border-radius: 4px;
-                background-color: white;
-                min-width: 100px;
-            }
+        QLineEdit { padding: 5px; border: 1px solid #d0d0d0; border-radius: 4px; background-color: white; min-width: 100px; }
         """)
         settings_layout.addWidget(overlap_edit, 4, 1)
         self.settings_widgets["OverlapPercentage"] = overlap_edit
@@ -242,13 +211,7 @@ class FFTViewFeature:
         avg_mode_combo.addItems(["No Averaging", "Linear", "Exponential"])
         avg_mode_combo.setCurrentText(self.settings.averaging_mode)
         avg_mode_combo.setStyleSheet("""
-            QComboBox {
-                padding: 5px;
-                border: 1px solid #d0d0d0;
-                border-radius: 4px;
-                background-color: white;
-                min-width: 100px;
-            }
+        QComboBox { padding: 5px; border: 1px solid #d0d0d0; border-radius: 4px; background-color: white; min-width: 100px; }
         """)
         settings_layout.addWidget(avg_mode_combo, 5, 1)
         self.settings_widgets["AveragingMode"] = avg_mode_combo
@@ -259,13 +222,7 @@ class FFTViewFeature:
         avg_num_edit = QLineEdit(str(self.settings.number_of_averages))
         avg_num_edit.setValidator(QIntValidator(1, 100))
         avg_num_edit.setStyleSheet("""
-            QLineEdit {
-                padding: 5px;
-                border: 1px solid #d0d0d0;
-                border-radius: 4px;
-                background-color: white;
-                min-width: 100px;
-            }
+        QLineEdit { padding: 5px; border: 1px solid #d0d0d0; border-radius: 4px; background-color: white; min-width: 100px; }
         """)
         settings_layout.addWidget(avg_num_edit, 6, 1)
         self.settings_widgets["NumberOfAverages"] = avg_num_edit
@@ -277,13 +234,7 @@ class FFTViewFeature:
         weight_combo.addItems(["Linear", "A-Weighting", "B-Weighting", "C-Weighting"])
         weight_combo.setCurrentText(self.settings.weighting_mode)
         weight_combo.setStyleSheet("""
-            QComboBox {
-                padding: 5px;
-                border: 1px solid #d0d0d0;
-                border-radius: 4px;
-                background-color: white;
-                min-width: 100px;
-            }
+        QComboBox { padding: 5px; border: 1px solid #d0d0d0; border-radius: 4px; background-color: white; min-width: 100px; }
         """)
         settings_layout.addWidget(weight_combo, 7, 1)
         self.settings_widgets["WeightingMode"] = weight_combo
@@ -295,63 +246,33 @@ class FFTViewFeature:
         linear_combo.addItems(["Continuous", "Peak Hold", "Time Synchronous"])
         linear_combo.setCurrentText(self.settings.linear_mode)
         linear_combo.setStyleSheet("""
-            QComboBox {
-                padding: 5px;
-                border: 1px solid #d0d0d0;
-                border-radius: 4px;
-                background-color: white;
-                min-width: 100px;
-            }
+        QComboBox { padding: 5px; border: 1px solid #d0d0d0; border-radius: 4px; background-color: white; min-width: 100px; }
         """)
         settings_layout.addWidget(linear_combo, 8, 1)
         self.settings_widgets["LinearMode"] = linear_combo
 
         save_button = QPushButton("Save")
         save_button.setStyleSheet("""
-            QPushButton {
-                background-color: #2196F3;
-                color: white;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 4px;
-                font-size: 14px;
-                min-width: 100px;
-            }
-            QPushButton:hover {
-                background-color: #1e88e5;
-            }
-            QPushButton:pressed {
-                background-color: #1976d2;
-            }
+        QPushButton { background-color: #2196F3; color: white; border: none; padding: 8px 16px; border-radius: 4px; font-size: 14px; min-width: 100px; }
+        QPushButton:hover { background-color: #1e88e5; }
+        QPushButton:pressed { background-color: #1976d2; }
         """)
         save_button.clicked.connect(self.save_settings)
 
         close_button = QPushButton("Close")
         close_button.setStyleSheet("""
-            QPushButton {
-                background-color: #f44336;
-                color: white;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 4px;
-                font-size: 14px;
-                min-width: 100px;
-            }
-            QPushButton:hover {
-                background-color: #e53935;
-            }
-            QPushButton:pressed {
-                background-color: #d32f2f;
-            }
+        QPushButton { background-color: #f44336; color: white; border: none; padding: 8px 16px; border-radius: 4px; font-size: 14px; min-width: 100px; }
+        QPushButton:hover { background-color: #e53935; }
+        QPushButton:pressed { background-color: #d32f2f; }
         """)
         close_button.clicked.connect(self.close_settings)
 
         settings_layout.addWidget(save_button, 9, 0)
         settings_layout.addWidget(close_button, 9, 1)
-
         main_layout.addWidget(self.settings_panel)
 
         plot_layout = QHBoxLayout() if self.layout_type == "horizontal" else QVBoxLayout()
+
         pg.setConfigOptions(antialias=False)
 
         self.magnitude_plot_widget = pg.PlotWidget()
@@ -388,17 +309,14 @@ class FFTViewFeature:
             if not project:
                 self.log_and_set_status(f"Project {self.project_name} not found for email {self.db.email}.")
                 return
-
             self.project_id = project["_id"]
             model = next((m for m in project["models"] if m["name"] == self.model_name), None)
             if not model:
                 self.log_and_set_status(f"Model {self.model_name} not found in project {self.project_name}.")
                 return
-
             channels = model.get("channels", [])
             if len(channels) != self.channel_count:
                 self.log_and_set_status(f"Warning: Model {self.model_name} has {len(channels)} channels, expected {self.channel_count}")
-            
             self.load_settings_from_database()
             if self.console:
                 self.console.append_to_console(f"Initialized FFTViewFeature with project_id: {self.project_id}, channel_index: {self.channel_index}")
@@ -410,7 +328,6 @@ class FFTViewFeature:
             database = self.mongo_client.get_database("changed_db")
             settings_collection = database.get_collection("FFTSettings")
             setting = settings_collection.find_one({"projectId": self.project_id}, sort=[("updatedAt", -1)])
-            
             if setting:
                 self.settings.window_type = setting.get("windowType", "Hamming")
                 self.settings.start_frequency = float(setting.get("startFrequency", 10.0))
@@ -421,7 +338,7 @@ class FFTViewFeature:
                 self.settings.number_of_averages = int(setting.get("numberOfAverages", 10))
                 self.settings.weighting_mode = setting.get("weightingMode", "Linear")
                 self.settings.linear_mode = setting.get("linearMode", "Continuous")
-                
+
                 self.settings_widgets["WindowType"].setCurrentText(self.settings.window_type)
                 self.settings_widgets["StartFrequency"].setText(str(self.settings.start_frequency))
                 self.settings_widgets["StopFrequency"].setText(str(self.settings.stop_frequency))
@@ -431,10 +348,9 @@ class FFTViewFeature:
                 self.settings_widgets["NumberOfAverages"].setText(str(self.settings.number_of_averages))
                 self.settings_widgets["WeightingMode"].setCurrentText(self.settings.weighting_mode)
                 self.settings_widgets["LinearMode"].setCurrentText(self.settings.linear_mode)
-                
+
                 self.magnitude_plot_widget.setXRange(self.settings.start_frequency, self.settings.stop_frequency, padding=0.02)
                 self.phase_plot_widget.setXRange(self.settings.start_frequency, self.settings.stop_frequency, padding=0.02)
-                
                 if self.console:
                     self.console.append_to_console(f"Loaded FFT settings for project ID: {self.project_id}")
             else:
@@ -481,50 +397,6 @@ class FFTViewFeature:
             if self.console:
                 self.console.append_to_console(f"Error saving FFT settings: {str(e)}")
 
-    def start_saving(self):
-        if self.is_saving:
-            return
-        try:
-            self.current_filename = datetime.utcnow().strftime("%Y%m%d_%H%M%S_FFT.bin")
-            self.is_saving = True
-            if self.console:
-                self.console.append_to_console(f"Started saving FFT data to {self.current_filename}")
-        except Exception as e:
-            self.log_and_set_status(f"Error starting FFT data saving: {str(e)}")
-
-    def stop_saving(self):
-        if not self.is_saving:
-            return
-        try:
-            self.is_saving = False
-            self.current_filename = None
-            if self.console:
-                self.console.append_to_console("Stopped saving FFT data")
-        except Exception as e:
-            self.log_and_set_status(f"Error stopping FFT data saving: {str(e)}")
-
-    def save_data_to_database(self, tag_name, values, sample_rate, frame_index):
-        try:
-            database = self.mongo_client.get_database("changed_db")
-            collection = database.get_collection("messages")
-            message_data = {
-                "topic": tag_name,
-                "filename": self.current_filename,
-                "frameIndex": frame_index,
-                "message": {
-                    "channel_data": [values[self.channel_index].tolist()] if self.channel_index is not None else [],
-                    "sample_rate": sample_rate
-                },
-                "projectId": self.project_id,
-                "createdAt": datetime.utcnow(),
-                "modelName": self.model_name
-            }
-            collection.insert_one(message_data)
-            if self.console:
-                self.console.append_to_console(f"Saved FFT data to database, frame {frame_index}")
-        except Exception as e:
-            self.log_and_set_status(f"Error saving FFT data to database: {str(e)}")
-
     def toggle_settings(self):
         self.settings_panel.setVisible(not self.settings_panel.isVisible())
         self.settings_button.setVisible(not self.settings_panel.isVisible())
@@ -547,14 +419,17 @@ class FFTViewFeature:
                 self.settings_widgets["StartFrequency"].setText(str(self.settings.start_frequency))
                 self.settings_widgets["StopFrequency"].setText(str(self.settings.stop_frequency))
                 self.log_and_set_status("Invalid frequency range, reset to defaults.")
+
             if self.settings.number_of_lines < 100 or self.settings.number_of_lines > 3200:
                 self.settings.number_of_lines = 1600
                 self.settings_widgets["NumberOfLines"].setText(str(self.settings.number_of_lines))
                 self.log_and_set_status("Invalid number of lines, reset to default.")
+
             if self.settings.overlap_percentage < 0 or self.settings.overlap_percentage > 99.9:
                 self.settings.overlap_percentage = 0.0
                 self.settings_widgets["OverlapPercentage"].setText(str(self.settings.overlap_percentage))
                 self.log_and_set_status("Invalid overlap percentage, reset to default.")
+
             if self.settings.number_of_averages < 1 or self.settings.number_of_averages > 100:
                 self.settings.number_of_averages = 10
                 self.settings_widgets["NumberOfAverages"].setText(str(self.settings.number_of_averages))
@@ -595,7 +470,6 @@ class FFTViewFeature:
                     f"channel_index={self.channel_index}, frame {frame_index}"
                 )
             return
-
         try:
             if frame_index != self.last_frame_index + 1 and self.last_frame_index != -1:
                 logging.warning(f"Non-sequential frame index: expected {self.last_frame_index + 1}, got {frame_index}")
@@ -615,7 +489,6 @@ class FFTViewFeature:
             raw_data = np.array(values[self.channel_index][:self.max_samples], dtype=np.float32)
             self.latest_data = raw_data * scaling_factor
             self.data_buffer.append(self.latest_data.copy())
-
             if len(self.data_buffer) > self.settings.number_of_averages:
                 self.data_buffer = self.data_buffer[-self.settings.number_of_averages:]
 
@@ -633,7 +506,6 @@ class FFTViewFeature:
     def update_plot(self):
         if not self.data_buffer:
             return
-
         try:
             data = self.data_buffer[-1] if self.settings.averaging_mode == "No Averaging" else np.mean(self.data_buffer, axis=0)
             n = len(data)
@@ -648,13 +520,13 @@ class FFTViewFeature:
             target_length = 2 ** int(np.ceil(np.log2(n)))
             padded_data = np.zeros(target_length)
             padded_data[:n] = windowed_data
+
             fft_result = fft(padded_data)
             half = target_length // 2
-
             frequencies = np.linspace(0, self.sample_rate / 2, half)
             freq_mask = (frequencies >= self.settings.start_frequency) & (frequencies <= self.settings.stop_frequency)
-            filtered_frequencies = frequencies[freq_mask]
 
+            filtered_frequencies = frequencies[freq_mask]
             magnitudes = np.abs(fft_result[:half]) / target_length
             phases = np.degrees(np.angle(fft_result[:half]))
             filtered_magnitudes = magnitudes[freq_mask]
@@ -671,8 +543,8 @@ class FFTViewFeature:
                 filtered_magnitudes *= weights
 
             if self.settings.averaging_mode == "Linear" and len(self.data_buffer) > 1:
-                avg_magnitudes = np.mean([np.abs(fft(np.zeros(target_length)[:n] + d * window)[:half]) / target_length for d in self.data_buffer], axis=0)
-                avg_phases = np.mean([np.degrees(np.angle(fft(np.zeros(target_length)[:n] + d * window)[:half])) for d in self.data_buffer], axis=0)
+                avg_magnitudes = np.mean([np.abs(fft(np.pad(d * window, (0, target_length - len(d)))))[:half] / target_length for d in self.data_buffer], axis=0)
+                avg_phases = np.mean([np.degrees(np.angle(fft(np.pad(d * window, (0, target_length - len(d)))))[:half]) for d in self.data_buffer], axis=0)
                 filtered_magnitudes = avg_magnitudes[freq_mask]
                 filtered_phases = avg_phases[freq_mask]
             elif self.settings.averaging_mode == "Exponential" and len(self.data_buffer) > 1:
@@ -680,7 +552,7 @@ class FFTViewFeature:
                 avg_magnitudes = np.zeros(half)
                 avg_phases = np.zeros(half)
                 for d in self.data_buffer:
-                    fft_d = fft(np.zeros(target_length)[:n] + d * window)
+                    fft_d = fft(np.pad(d * window, (0, target_length - len(d))))
                     avg_magnitudes = alpha * (np.abs(fft_d[:half]) / target_length) + (1 - alpha) * avg_magnitudes
                     avg_phases = alpha * np.degrees(np.angle(fft_d[:half])) + (1 - alpha) * avg_phases
                 filtered_magnitudes = avg_magnitudes[freq_mask]
@@ -719,3 +591,52 @@ class FFTViewFeature:
 
     def refresh_channel_properties(self):
         self.initialize_async()
+
+    # NEW: Load selected saved frame payload and plot FFT (first main channel by default if no explicit channel)
+    def load_selected_frame(self, payload: dict):
+        try:
+            if not payload:
+                self.log_and_set_status("FFT: Invalid selection payload (empty).")
+                return
+            num_main = int(payload.get("numberOfChannels", 0))
+            num_tacho = int(payload.get("tacoChannelCount", 0))
+            total_ch = num_main + num_tacho
+            Fs = float(payload.get("samplingRate", 0) or 0)
+            N = int(payload.get("samplingSize", 0) or 0)
+            data_flat = payload.get("channelData", [])
+            if not Fs or not N or not total_ch or not data_flat:
+                self.log_and_set_status("FFT: Incomplete selection payload (Fs/N/channels/data missing).")
+                return
+
+            # Shape data into channels if flattened
+            if isinstance(data_flat, list) and data_flat and isinstance(data_flat[0], (int, float)):
+                if len(data_flat) != total_ch * N:
+                    self.log_and_set_status(f"FFT: Data length mismatch. expected {total_ch*N}, got {len(data_flat)}")
+                    return
+                values = []
+                for ch in range(total_ch):
+                    start = ch * N
+                    end = start + N
+                    values.append(data_flat[start:end])
+            else:
+                # Assume already list-of-lists
+                values = data_flat
+                if len(values) != total_ch or any(len(v) != N for v in values):
+                    self.log_and_set_status("FFT: Invalid nested data shape in selection payload.")
+                    return
+
+            # Default to first main channel if none selected
+            self.channel_index = self.channel_index if self.channel_index is not None else 0
+            if self.channel_index >= num_main:
+                self.channel_index = 0
+
+            self.sample_rate = Fs
+            scaling_factor = 3.3 / 65535.0
+            raw = np.array(values[self.channel_index][:self.max_samples], dtype=np.float32)
+            self.latest_data = raw * scaling_factor
+            self.data_buffer = [self.latest_data.copy()]
+            self.update_plot()
+            if self.console:
+                self.console.append_to_console(f"FFT: Loaded selected frame {payload.get('frameIndex')} ({N} samples @ {Fs}Hz)")
+        except Exception as e:
+            self.log_and_set_status(f"FFT: Error loading selected frame: {e}")
